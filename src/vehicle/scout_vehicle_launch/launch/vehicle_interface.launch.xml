@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="vehicle_id" default="default"/>
+  <arg name="vehicle_interface_can_interface" default="can0"/>
+  <arg name="enable_can_io" default="true"/>
+  <node pkg="scout_base" exec="scout_base_node" name="scout_base" if="$(var enable_can_io)" output="screen">
+    <param name="port_name" value="$(var vehicle_interface_can_interface)"/>
+    <param name="auto_reconnect" value="false"/>
+    <param name="odom_frame" value="scout_wheel_odom"/>
+    <param name="base_frame" value="scout_chassis_link"/>
+    <param name="odom_topic_name" value="/scout/wheel_odometry"/>
+    <remap from="/cmd_vel" to="/scout/cmd_vel"/>
+    <remap from="/scout_status" to="/scout/status"/>
+    <remap from="/tf" to="/scout/wheel_tf"/>
+  </node>
+  <node pkg="scout_autoware_interface" exec="scout_interface" name="scout_autoware_interface" output="screen"/>
+</launch>

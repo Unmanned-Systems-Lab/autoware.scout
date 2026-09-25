@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="start_drivers" default="true"/>
+  <arg name="rslidar_config" default="$(find-pkg-share scout_sensor_kit_launch)/config/rslidar.yaml"/>
+  <arg name="fixposition_config" default="$(find-pkg-share scout_sensor_kit_launch)/config/fixposition.yaml"/>
+  <group if="$(var start_drivers)">
+    <node pkg="fixposition_driver_ros2" exec="fixposition_driver_ros2_exec" name="fixposition_driver" output="screen">
+      <param from="$(var fixposition_config)"/>
+      <param name="nav2_mode" value="false"/>
+      <remap from="/fixposition/poiimu" to="/sensing/imu/imu_data"/>
+      <!-- Autoware localization owns map -> base_link; keep raw FP transforms separate. -->
+      <remap from="/tf" to="/fixposition/tf"/>
+      <remap from="/tf_static" to="/fixposition/tf_static"/>
+    </node>
+    <node pkg="rslidar_sdk" exec="rslidar_sdk_node" name="rslidar_sdk" output="screen">
+      <param name="config_path" value="$(var rslidar_config)"/>
+    </node>
+  </group>
+</launch>

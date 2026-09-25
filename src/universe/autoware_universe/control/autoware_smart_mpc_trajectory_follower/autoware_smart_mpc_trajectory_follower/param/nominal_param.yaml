@@ -1,0 +1,10 @@
+# Scout equivalent bicycle model; response dynamics require physical calibration.
+nominal_parameter:
+  vehicle_info:
+    wheel_base: 0.498
+  acceleration:
+    acc_time_delay: 0.1
+    acc_time_constant: 0.1
+  steering:
+    steer_time_delay: 0.27
+    steer_time_constant: 0.24

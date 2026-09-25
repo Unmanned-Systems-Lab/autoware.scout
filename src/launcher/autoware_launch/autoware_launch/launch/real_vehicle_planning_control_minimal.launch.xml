@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Compatibility entry point: this checkout runs the ELE Scout hardware. -->
+  <arg name="map_path"/>
+  <arg name="rviz" default="true"/>
+  <arg name="launch_vehicle_interface" default="true"/>
+  <arg name="start_sensor_drivers" default="true"/>
+  <include file="$(find-pkg-share autoware_launch)/launch/real_scout.launch.xml">
+    <arg name="map_path" value="$(var map_path)"/>
+    <arg name="rviz" value="$(var rviz)"/>
+    <arg name="launch_vehicle_interface" value="$(var launch_vehicle_interface)"/>
+    <arg name="start_sensor_drivers" value="$(var start_sensor_drivers)"/>
+  </include>
+</launch>

@@ -1,0 +1,19 @@
+ins_driver_ez21:
+  ros__parameters:
+    can_interface: can2
+    topic_name: /odom
+    frame_id: odom
+    child_frame_id: base_link
+    publish_raw_nav_sat_fix: true
+    raw_nav_sat_fix_topic: /sensing/ins/raw_nav_sat_fix
+    raw_nav_sat_fix_frame_id: ins_link
+    socket_timeout_sec: 0.2
+    log_enabled: false
+    log_path: ~/ins_driver_ez21/logs
+    log_name: auto
+    log_name_format: '%y%m%d%H%M%S.txt'
+    log_format: can
+    reference_origin_active: true
+    reference_origin_latitude_deg: 29.5916653
+    reference_origin_longitude_deg: 121.9868824
+    reference_origin_altitude_m: 21.306

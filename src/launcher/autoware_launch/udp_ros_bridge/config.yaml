@@ -1,0 +1,24 @@
+# 网络配置
+network:
+  local_ip: "192.168.1.102"
+  remote_ip: "192.168.1.115"
+  udp_port_cmd: 60001
+  udp_port_status: 60001
+  udp_buf_size: 1024
+
+# 消息ID
+message_ids:
+  msg_id_auto: 0x00010001
+  msg_id_traj: 0x00010002
+  msg_id_remote: 0x00010003
+  msg_id_status: 0x00020001
+
+# 协议参数
+protocol_params:
+  max_traj_points: 200
+  time_stamp_len: 8
+  check_sum_len: 2
+
+# CAN配置
+can_config:
+  can_id_base: 0x105

@@ -1,0 +1,4 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="scout_sensors">
+  <!-- The ELE Scout assembly in vehicle.xacro owns the calibrated sensor frames. -->
+</robot>

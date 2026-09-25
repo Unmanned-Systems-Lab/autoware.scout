@@ -1,0 +1,10 @@
+/**:
+  ros__parameters:
+    update_rate: 10.0
+    add_duplicated_node_names_to_msg: true # if true, duplicated node names are added to msg
+    nodes_to_ignore:  # List of nodes to ignore when checking for duplicates
+      - /rviz2
+      - /simulation/getParameter
+      - /trajectory_relay
+      - /system/processing_time_checker
+      - /robot_state_publisher

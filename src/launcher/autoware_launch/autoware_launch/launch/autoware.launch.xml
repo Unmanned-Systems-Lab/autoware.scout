@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <!-- Essential parameters -->
+  <arg name="map_path" default="$(find-pkg-share autoware_launch)/../../../../src/launcher/autoware_launch/ui/generated_maps/autoware_init_map" description="point cloud and lanelet2 map directory path"/>
+  <arg name="vehicle_model" default="scout_vehicle" description="vehicle model name"/>
+  <arg name="sensor_model" default="scout_sensor_kit" description="sensor model name"/>
+  <arg name="pointcloud_container_name" default="pointcloud_container"/>
+  <arg name="launch_pointcloud_container" default="true" description="launch shared pointcloud container"/>
+  <arg name="data_path" default="$(env HOME)/autoware_data" description="packages data and artifacts directory path"/>
+
+  <!-- launch module preset -->
+  <arg name="planning_module_preset" default="default" description="planning module preset"/>
+  <arg name="control_module_preset" default="default" description="control module preset"/>
+
+  <!-- Optional parameters -->
+  <!-- Modules to be launched -->
+  <arg name="launch_vehicle" default="true" description="launch vehicle"/>
+  <arg name="launch_system" default="true" description="launch system"/>
+  <arg name="launch_map" default="true" description="launch map"/>
+  <arg name="launch_sensing" default="true" description="launch sensing"/>
+  <arg name="launch_sensing_driver" default="true" description="launch sensing driver"/>
+  <arg name="launch_localization" default="true" description="launch localization"/>
+  <arg name="launch_perception" default="true" description="launch perception"/>
+  <arg name="launch_planning" default="true" description="launch planning"/>
+  <arg name="launch_control" default="true" description="launch control"/>
+  <arg name="launch_api" default="true" description="launch api"/>
+  <!-- Global parameters -->
+  <arg name="use_sim_time" default="false" description="use_sim_time"/>
+  <!-- Vehicle -->
+  <arg name="vehicle_id" default="$(env VEHICLE_ID default)" description="vehicle specific ID"/>
+  <arg name="launch_vehicle_interface" default="true" description="launch vehicle interface"/>
+  <arg
+    name="vehicle_interface_can_interface"
+    default="can0"
+    description="SocketCAN interface used by the vehicle interface"/>
+  <!-- Control -->
+  <arg name="check_external_emergency_heartbeat" default="false"/>
+  <arg name="operation_mode_transition_manager_param_path" default="$(find-pkg-share autoware_launch)/config/control/operation_mode_transition_manager/operation_mode_transition_manager.param.yaml"/>
+  <!-- Map -->
+  <arg name="lanelet2_map_file" default="lanelet2_map.osm" description="lanelet2 map file name"/>
+  <arg name="pointcloud_map_file" default="pointcloud_map.pcd" description="pointcloud map file name"/>
+  <!-- System -->
+  <arg name="system_run_mode" default="online" description="run mode in system"/>
+  <arg name="launch_system_monitor" default="true" description="launch system monitor"/>
+  <arg name="launch_dummy_diag_publisher" default="false" description="launch dummy diag publisher"/>
+  <arg name="diagnostic_graph_aggregator_graph_path" default="$(find-pkg-share autoware_launch)/config/system/diagnostics/autoware-main.yaml" description="diagnostic graph config"/>
+  <arg name="component_state_monitor_topic_path" default="$(find-pkg-share autoware_launch)/config/system/component_state_monitor/topics.yaml" description="component state monitor topics config"/>
+  <!-- Tools -->
+  <arg name="rviz" default="true" description="launch rviz"/>
+  <arg name="rviz_config_name" default="autoware.rviz" description="rviz config name"/>
+  <arg name="rviz_config" default="$(find-pkg-share autoware_launch)/rviz/$(var rviz_config_name)" description="rviz config path"/>
+  <arg name="rviz_respawn" default="true"/>
+  <arg name="launch_ui" default="false" description="launch runtime route/HMI UI server"/>
+  <arg name="ui_host" default="127.0.0.1" description="host address for the runtime route/HMI UI server"/>
+  <arg name="ui_port" default="8090" description="port for the runtime route/HMI UI server"/>
+  <arg name="open_ui_index" default="false" description="open the runtime route/HMI UI in a desktop browser"/>
+  <arg name="ui_launcher" default="$(find-pkg-share autoware_launch)/../../../../src/launcher/autoware_launch/ui/start_ui_server.sh" description="launcher script for the runtime route/HMI UI server"/>
+  <!-- Perception -->
+  <arg name="perception_mode" default="lidar" description="select perception mode. camera_lidar_radar_fusion, camera_lidar_fusion, lidar_radar_fusion, lidar, radar"/>
+  <arg name="traffic_light_recognition/use_high_accuracy_detection" default="true" description="enable to use high accuracy detection for traffic light recognition"/>
+  <arg name="launch_ins_driver" default="false" description="optional legacy CAN INS driver, unused by Scout"/>
+  <arg name="ins_driver_param_path" default="$(find-pkg-share ins_driver_ez21)/config/driver.yaml" description="parameter file for INS driver"/>
+  <arg name="ins_driver_can_interface" default="can0" description="SocketCAN interface used by the INS driver"/>
+  <arg name="localization_map_projector_info_path" default="" description="optional map_projector_info.yaml path used as a fixed ENU origin for the INS driver"/>
+  <arg name="localization_input_odom_topic" default="/odom_ins_at_base_link" description="odometry topic used as localization input"/>
+  <arg name="localization_output_base_link_odom_topic" default="" description="optional converted odometry topic at base_link"/>
+  <arg name="localization_output_frame_id" default="map" description="frame_id for INS-based localization outputs"/>
+  <arg name="localization_output_child_frame_id" default="base_link" description="child_frame_id for INS-based localization outputs"/>
+  <arg name="localization_base_link_to_ins_x" default="0.0" description="INS mounting x in base_link frame [m]"/>
+  <arg name="localization_base_link_to_ins_y" default="0.0" description="INS mounting y in base_link frame [m]"/>
+  <arg name="localization_base_link_to_ins_z" default="0.0" description="INS mounting z in base_link frame [m]"/>
+  <arg name="localization_base_link_to_ins_roll" default="0.0" description="INS mounting roll in base_link frame [rad]"/>
+  <arg name="localization_base_link_to_ins_pitch" default="0.0" description="INS mounting pitch in base_link frame [rad]"/>
+  <arg name="localization_base_link_to_ins_yaw" default="0.0" description="INS mounting yaw in base_link frame [rad]"/>
+  <!-- Planning -->
+  <arg name="planning_input_objects_topic_name" default="/perception/object_recognition/objects" description="objects topic used by planning"/>
+  <arg name="planning_input_pointcloud_topic_name" default="/perception/obstacle_segmentation/pointcloud" description="pointcloud topic used by planning"/>
+  <arg name="launch_planning_dummy_publishers" default="false" description="launch empty publishers for planning-required pointcloud, occupancy grid, costmap, and objects"/>
+  <arg name="planning_dummy_publishers_param_path" default="$(find-pkg-share ins_driver_ez21)/config/planning_dummy_publishers.yaml" description="parameter file for planning dummy publishers"/>
+  <!-- Auto mode setting-->
+  <arg name="enable_all_modules_auto_mode" default="false" description="enable all module's auto mode"/>
+  <arg name="is_simulation" default="false" description="Autoware's behavior will change depending on whether this is a simulation or not."/>
+
+  <!-- Global parameters -->
+  <group scoped="false">
+    <include file="$(find-pkg-share autoware_global_parameter_loader)/launch/global_params.launch.py">
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="vehicle_model" value="$(var vehicle_model)"/>
+    </include>
+  </group>
+
+  <!-- Pointcloud container -->
+  <group if="$(var launch_pointcloud_container)">
+    <include file="$(find-pkg-share autoware_launch)/launch/pointcloud_container.launch.py">
+      <arg name="use_multithread" value="true"/>
+      <arg name="container_name" value="$(var pointcloud_container_name)"/>
+    </include>
+  </group>
+
+  <!-- Start the runtime route/HMI UI early so the page is available while the rest of Autoware boots. -->
+  <executable
+    cmd="bash $(var ui_launcher) $(var ui_host) $(var ui_port) $(var open_ui_index)"
+    name="autoware_runtime_ui"
+    output="screen"
+    if="$(var launch_ui)"
+  />
+
+  <!-- Vehicle -->
+  <group if="$(var launch_vehicle)">
+    <include file="$(find-pkg-share tier4_vehicle_launch)/launch/vehicle.launch.xml">
+      <arg name="vehicle_model" value="$(var vehicle_model)"/>
+      <arg name="sensor_model" value="$(var sensor_model)"/>
+      <arg name="vehicle_id" value="$(var vehicle_id)"/>
+      <arg name="launch_vehicle_interface" value="$(var launch_vehicle_interface)"/>
+      <arg name="vehicle_interface_can_interface" value="$(var vehicle_interface_can_interface)"/>
+      <arg name="config_dir" value="$(find-pkg-share $(var sensor_model)_description)/config"/>
+      <arg name="raw_vehicle_cmd_converter_param_path" value="$(find-pkg-share autoware_launch)/config/vehicle/raw_vehicle_cmd_converter/raw_vehicle_cmd_converter.param.yaml"/>
+    </include>
+  </group>
+
+  <!-- System -->
+  <group if="$(var launch_system)">
+    <include file="$(find-pkg-share autoware_launch)/launch/components/tier4_system_component.launch.xml">
+      <arg name="component_state_monitor_topic_path" value="$(var component_state_monitor_topic_path)"/>
+    </include>
+  </group>
+
+  <!-- Map -->
+  <group if="$(var launch_map)">
+    <include file="$(find-pkg-share autoware_launch)/launch/components/tier4_map_component.launch.xml"/>
+  </group>
+
+  <!-- Sensing -->
+  <group if="$(var launch_sensing)">
+    <include file="$(find-pkg-share autoware_launch)/launch/components/tier4_sensing_component.launch.xml">
+      <arg name="pointcloud_container_name" value="$(var pointcloud_container_name)"/>
+    </include>
+  </group>
+
+  <!-- Localization -->
+  <group if="$(var launch_localization)">
+    <include file="$(find-pkg-share autoware_launch)/launch/components/ins_localization_component.launch.xml">
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="launch_ins_driver" value="$(var launch_ins_driver)"/>
+      <arg name="ins_driver_param_path" value="$(var ins_driver_param_path)"/>
+      <arg name="ins_driver_can_interface" value="$(var ins_driver_can_interface)"/>
+      <arg name="map_projector_info_path" value="$(var localization_map_projector_info_path)"/>
+      <arg name="input_odom_topic" value="$(var localization_input_odom_topic)"/>
+      <arg name="output_base_link_odom_topic" value="$(var localization_output_base_link_odom_topic)"/>
+      <arg name="output_frame_id" value="$(var localization_output_frame_id)"/>
+      <arg name="output_child_frame_id" value="$(var localization_output_child_frame_id)"/>
+      <arg name="base_link_to_ins_x" value="$(var localization_base_link_to_ins_x)"/>
+      <arg name="base_link_to_ins_y" value="$(var localization_base_link_to_ins_y)"/>
+      <arg name="base_link_to_ins_z" value="$(var localization_base_link_to_ins_z)"/>
+      <arg name="base_link_to_ins_roll" value="$(var localization_base_link_to_ins_roll)"/>
+      <arg name="base_link_to_ins_pitch" value="$(var localization_base_link_to_ins_pitch)"/>
+      <arg name="base_link_to_ins_yaw" value="$(var localization_base_link_to_ins_yaw)"/>
+    </include>
+  </group>
+
+  <!-- Perception -->
+  <group if="$(var launch_perception)">
+    <include file="$(find-pkg-share autoware_launch)/launch/components/tier4_perception_component.launch.xml">
+      <arg name="data_path" value="$(var data_path)"/>
+      <arg name="pointcloud_container_name" value="$(var pointcloud_container_name)"/>
+    </include>
+  </group>
+
+  <!-- Optional dummy inputs for planning -->
+  <group if="$(var launch_planning_dummy_publishers)">
+    <node pkg="ins_driver_ez21" exec="planning_dummy_publishers" name="planning_dummy_publishers" output="screen">
+      <param from="$(var planning_dummy_publishers_param_path)"/>
+      <param name="objects_topic" value="$(var planning_input_objects_topic_name)"/>
+      <param name="pointcloud_topic" value="$(var planning_input_pointcloud_topic_name)"/>
+    </node>
+  </group>
+
+  <!-- Planning -->
+  <group if="$(var launch_planning)">
+    <include file="$(find-pkg-share autoware_launch)/launch/components/tier4_planning_component.launch.xml">
+      <arg name="module_preset" value="$(var planning_module_preset)"/>
+      <arg name="enable_all_modules_auto_mode" value="$(var enable_all_modules_auto_mode)"/>
+      <arg name="is_simulation" value="$(var is_simulation)"/>
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="vehicle_model" value="$(var vehicle_model)"/>
+      <arg name="planning_input_objects_topic_name" value="$(var planning_input_objects_topic_name)"/>
+      <arg name="planning_input_pointcloud_topic_name" value="$(var planning_input_pointcloud_topic_name)"/>
+    </include>
+
+    <!-- Relay node for trajectory topic -->
+    <!-- This is a temporary addition for migration purposes. -->
+    <!-- https://github.com/orgs/autowarefoundation/discussions/5033#discussioncomment-13704802 -->
+    <node pkg="topic_tools" exec="relay" name="trajectory_relay">
+      <param name="input_topic" value="/planning/trajectory"/>
+      <param name="output_topic" value="/planning/scenario_planning/trajectory"/>
+    </node>
+  </group>
+
+  <!-- Control -->
+  <group if="$(var launch_control)">
+    <include file="$(find-pkg-share autoware_launch)/launch/components/tier4_control_component.launch.xml">
+      <arg name="module_preset" value="$(var control_module_preset)"/>
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="vehicle_model" value="$(var vehicle_model)"/>
+      <arg name="operation_mode_transition_manager_param_path" value="$(var operation_mode_transition_manager_param_path)"/>
+    </include>
+  </group>
+
+  <!-- API -->
+  <group if="$(var launch_api)">
+    <include file="$(find-pkg-share autoware_launch)/launch/components/tier4_autoware_api_component.launch.xml">
+      <arg name="use_sim_time" value="$(var use_sim_time)"/>
+      <arg name="vehicle_model" value="$(var vehicle_model)"/>
+    </include>
+  </group>
+
+  <!-- Tools -->
+  <group>
+    <node
+      pkg="rviz2"
+      exec="rviz2"
+      name="rviz2"
+      output="screen"
+      args="-d $(var rviz_config) -s $(find-pkg-share autoware_launch)/rviz/image/autoware.png"
+      if="$(var rviz)"
+      respawn="$(var rviz_respawn)"
+    >
+      <env name="QT_QPA_PLATFORMTHEME" value="qt5ct"/>
+    </node>
+  </group>
+
+</launch>

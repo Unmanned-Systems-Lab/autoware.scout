@@ -1,0 +1,33 @@
+common:
+  msg_source: 1
+  send_packet_ros: false
+  send_point_cloud_ros: true
+
+lidar:
+  - driver:
+      lidar_type: RSM1
+      msop_port: 6699
+      difop_port: 7788
+      imu_port: 0
+      user_layer_bytes: 0
+      tail_layer_bytes: 0
+      min_distance: 0.2
+      max_distance: 200.0
+      use_lidar_clock: false
+      dense_points: false
+      ts_first_point: true
+      start_angle: 0
+      end_angle: 360
+      pcap_repeat: true
+      pcap_rate: 1.0
+      pcap_path: /tmp/robosense_m1.pcap
+
+    ros:
+      # Match the M1 frame that actually exists in ez21_sensor_kit_description.
+      ros_frame_id: m1_lidar
+      ros_recv_packet_topic: /sensing/lidar/top/rslidar_packets
+      ros_send_packet_topic: /sensing/lidar/top/rslidar_packets
+      ros_send_imu_data_topic: /sensing/lidar/top/rslidar_imu_data
+      ros_send_point_cloud_topic: /sensing/lidar/top/pointcloud_raw_ex
+      ros_send_autoware_pointcloud: true
+      ros_queue_length: 100
