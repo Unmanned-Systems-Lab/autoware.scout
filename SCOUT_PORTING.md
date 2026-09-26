@@ -45,3 +45,31 @@ No physical vehicle motion or calibration is claimed by software-only tests.
 - Chassis adapter launched with CAN disabled and exited cleanly on SIGINT.
 - Local CUDA helper libraries were copied into ignored `.deps`; these platform
   binaries are not part of the published source repository.
+
+## Live Sensor Connectivity Check
+
+Only sensor drivers were started in isolated, localhost-only ROS domains.
+No chassis/CAN driver, autonomous mode or motion-command publisher was enabled.
+
+- Ethernet `eno1` had carrier but no IPv4 address. Passive capture showed devices
+  requesting host `192.168.1.102`. Temporarily assigning `192.168.1.102/24` made
+  the sensor network reachable without changing Wi-Fi or the default route.
+- RSHELIOS: received 384 clouds in a 40-second observation window (about 9.6 Hz),
+  with 57,600 points in the last cloud, frame `rslidar`, and the expected
+  Autoware point fields.
+- Fixposition: ping and TCP `192.168.1.103:21000` succeeded. After restarting the
+  driver with the Ethernet address present, ROS received ENU odometry, status
+  and derived POI IMU messages.
+- **Localization was not valid:** `init_status=0` (not initialized),
+  `fusion_status=0` (not started), and both GNSS receivers reported no fix.
+  Position and derived IMU values were zero; the driver warned that the
+  `FP_ECEF -> FP_ENU0` transform was invalid. Receiving messages is not evidence
+  of valid localization. Do not use this state for autonomous operation.
+- All test drivers were stopped and the temporary Ethernet address was removed.
+  No persistent network configuration or sensor configuration was changed.
+
+Before further sensor testing, configure the host sensor-network address after
+checking for address conflicts. Check GNSS antennas, reception and device fusion
+status while keeping vehicle control disabled. Do not move the vehicle
+autonomously to initialize localization. Raw test logs are intentionally not
+included in the repository.

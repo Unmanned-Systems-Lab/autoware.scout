@@ -110,4 +110,8 @@ python3 -m unittest discover -s tests -v
 Tests cover command gating/limits, reverse steering, the combined model, sensor
 endpoints and best-effort Fixposition localization with lever-arm correction.
 Hardware-disabled checks are not real-vehicle acceptance tests.
+Live sensor checks confirmed lidar data and Fixposition connectivity, but
+Fixposition had no GNSS fix and uninitialized fusion. Its zero-valued outputs
+must not be treated as valid localization. The host Ethernet interface also
+requires a sensor-network address; the temporary test address was removed.
 See [SCOUT_PORTING.md](SCOUT_PORTING.md) for provenance and licensing.
