@@ -1,0 +1,11 @@
+std_msgs/Header header
+uint32 msg_id
+uint64 timestamp
+uint8 source
+uint8 uc_auto_sys_state
+uint16 us_auto_speed_limit
+uint16 us_expect_speed
+uint16 us_expect_acc
+uint8 uc_emerg_stop
+uint8 us_auto_sys_heart
+uint16 us_checksum

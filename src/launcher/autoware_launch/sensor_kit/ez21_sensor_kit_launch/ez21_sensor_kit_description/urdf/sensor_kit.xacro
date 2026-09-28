@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://ros.org/wiki/xacro">
+  <xacro:macro name="sensor_kit_macro" params="parent x y z roll pitch yaw">
+    <xacro:include filename="$(find ez21_sensor_kit_description)/sensor/m1/urdf/M1.urdf.xacro"/>
+    <xacro:arg name="config_dir" default="$(find ez21_sensor_kit_description)/config"/>
+
+    <xacro:property name="sensor_kit_base_link" default="sensor_kit_base_link"/>
+
+    <joint name="${sensor_kit_base_link}_joint" type="fixed">
+      <origin rpy="${roll} ${pitch} ${yaw}" xyz="${x} ${y} ${z}"/>
+      <parent link="${parent}"/>
+      <child link="${sensor_kit_base_link}"/>
+    </joint>
+    <link name="${sensor_kit_base_link}">
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+    </link>
+
+    <!-- sensor -->
+    <xacro:property name="calibration" value="${xacro.load_yaml('$(arg config_dir)/sensor_kit_calibration.yaml')}"/>
+
+    <!-- M1 lidar -->
+    <xacro:M1 parent="sensor_kit_base_link" name="m1_lidar">
+      <origin
+        xyz="${calibration['sensor_kit_base_link']['m1_lidar_base_link']['x']}
+             ${calibration['sensor_kit_base_link']['m1_lidar_base_link']['y']}
+             ${calibration['sensor_kit_base_link']['m1_lidar_base_link']['z']}"
+        rpy="${calibration['sensor_kit_base_link']['m1_lidar_base_link']['roll']}
+             ${calibration['sensor_kit_base_link']['m1_lidar_base_link']['pitch']}
+             ${calibration['sensor_kit_base_link']['m1_lidar_base_link']['yaw']}"
+      />
+    </xacro:M1>
+  </xacro:macro>
+</robot>

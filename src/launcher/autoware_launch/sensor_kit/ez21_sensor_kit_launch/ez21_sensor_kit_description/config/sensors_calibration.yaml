@@ -1,0 +1,9 @@
+base_link:
+  # Mount pose copied from ez21_vehicle_description/urdf/vehicle.xacro.
+  sensor_kit_base_link:
+    x: 1.30725860595703
+    y: -0.00451123341917992
+    z: 0.394937843084335
+    roll: 0.0
+    pitch: 0.0
+    yaw: 0.0

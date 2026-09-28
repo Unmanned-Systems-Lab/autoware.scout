@@ -1,0 +1,240 @@
+cmake_minimum_required(VERSION 3.14)
+project(autoware_lidar_transfusion)
+
+find_package(autoware_cmake REQUIRED)
+autoware_package()
+
+add_compile_options(-Wno-deprecated-declarations)
+
+option(CUDA_VERBOSE "Verbose output of CUDA modules" OFF)
+
+# set flags for CUDA availability
+option(CUDA_AVAIL "CUDA available" OFF)
+find_package(CUDA)
+if(CUDA_FOUND)
+  foreach(cuda_target_include_dir
+      "${CUDA_TOOLKIT_ROOT_DIR}/targets/${CMAKE_SYSTEM_PROCESSOR}-linux/include"
+      "${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/include"
+      "${CUDA_TOOLKIT_ROOT_DIR}/targets/sbsa-linux/include")
+    if(EXISTS "${cuda_target_include_dir}/cublas_v2.h")
+      list(APPEND CUDA_INCLUDE_DIRS "${cuda_target_include_dir}")
+    endif()
+  endforeach()
+  list(REMOVE_DUPLICATES CUDA_INCLUDE_DIRS)
+endif()
+if(CUDA_FOUND)
+set(CUDA_TARGET_LIBRARY_DIRS
+    "${CUDA_TOOLKIT_ROOT_DIR}/targets/${CMAKE_SYSTEM_PROCESSOR}-linux/lib"
+    "${CUDA_TOOLKIT_ROOT_DIR}/targets/${CMAKE_SYSTEM_PROCESSOR}-linux/lib/stubs"
+    "${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib"
+    "${CUDA_TOOLKIT_ROOT_DIR}/targets/aarch64-linux/lib/stubs"
+    "${CUDA_TOOLKIT_ROOT_DIR}/targets/sbsa-linux/lib"
+    "${CUDA_TOOLKIT_ROOT_DIR}/targets/sbsa-linux/lib/stubs"
+  )
+  list(APPEND CUDA_LIBRARY_DIRS ${CUDA_TARGET_LIBRARY_DIRS})
+  list(REMOVE_DUPLICATES CUDA_LIBRARY_DIRS)
+  find_library(CUBLAS_LIBRARIES cublas HINTS
+    ${CUDA_TOOLKIT_ROOT_DIR}/lib64
+    ${CUDA_TOOLKIT_ROOT_DIR}/lib
+    ${CUDA_TARGET_LIBRARY_DIRS}
+  )
+  if(NOT CUDA_curand_LIBRARY)
+    find_library(CUDA_curand_LIBRARY curand HINTS
+      ${CUDA_TOOLKIT_ROOT_DIR}/lib64
+      ${CUDA_TOOLKIT_ROOT_DIR}/lib
+      ${CUDA_TARGET_LIBRARY_DIRS}
+    )
+  endif()
+  if(CUDA_VERBOSE)
+    message("CUDA is available!")
+    message("CUDA Libs: ${CUDA_LIBRARIES}")
+    message("CUDA Headers: ${CUDA_INCLUDE_DIRS}")
+  endif()
+  # Note: cublas_device was depreciated in CUDA version 9.2
+  #       https://forums.developer.nvidia.com/t/where-can-i-find-libcublas-device-so-or-libcublas-device-a/67251/4
+  #       In LibTorch, CUDA_cublas_device_LIBRARY is used.
+  unset(CUDA_cublas_device_LIBRARY CACHE)
+  set(CUDA_AVAIL ON)
+else()
+  message("CUDA NOT FOUND")
+  set(CUDA_AVAIL OFF)
+endif()
+
+# set flags for TensorRT availability
+option(TRT_AVAIL "TensorRT available" OFF)
+# try to find the tensorRT modules
+find_library(NVINFER nvinfer)
+find_library(NVONNXPARSER nvonnxparser)
+if(NVINFER AND NVONNXPARSER)
+  if(CUDA_VERBOSE)
+    message("TensorRT is available!")
+    message("NVINFER: ${NVINFER}")
+    message("NVONNXPARSER: ${NVONNXPARSER}")
+  endif()
+  set(TRT_AVAIL ON)
+else()
+  message("TensorRT is NOT Available")
+  set(TRT_AVAIL OFF)
+endif()
+
+if(TRT_AVAIL AND CUDA_AVAIL)
+  find_package(ament_cmake_auto REQUIRED)
+  ament_auto_find_build_dependencies()
+
+  include_directories(
+    include
+    ${CUDA_INCLUDE_DIRS}
+  )
+
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_CUDA_FLAGS ${CMAKE_CUDA_FLAGS} "-g -G")
+    set(CUDA_NVCC_FLAGS "-g -G")
+  endif()
+
+  ament_auto_add_library(${PROJECT_NAME}_lib SHARED
+    lib/detection_class_remapper.cpp
+    lib/postprocess/non_maximum_suppression.cpp
+    lib/preprocess/voxel_generator.cpp
+    lib/preprocess/pointcloud_densification.cpp
+    lib/ros_utils.cpp
+    lib/transfusion_trt.cpp
+  )
+
+  execute_process(
+    COMMAND ${CUDA_NVCC_EXECUTABLE} --list-gpu-arch
+    OUTPUT_VARIABLE CUDA_SUPPORTED_GPU_ARCHS_RAW
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  string(REPLACE "\n" ";" CUDA_SUPPORTED_GPU_ARCHS "${CUDA_SUPPORTED_GPU_ARCHS_RAW}")
+
+  foreach(cuda_arch IN ITEMS 86 87 89 90 101 110 120)
+    if("compute_${cuda_arch}" IN_LIST CUDA_SUPPORTED_GPU_ARCHS)
+      list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_${cuda_arch},code=sm_${cuda_arch}")
+    endif()
+  endforeach()
+
+  if("compute_120" IN_LIST CUDA_SUPPORTED_GPU_ARCHS)
+    list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_120,code=compute_120")
+  elseif("compute_90" IN_LIST CUDA_SUPPORTED_GPU_ARCHS)
+    list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_90,code=compute_90")
+  endif()
+
+  cuda_add_library(${PROJECT_NAME}_cuda_lib SHARED
+    lib/postprocess/circle_nms_kernel.cu
+    lib/postprocess/postprocess_kernel.cu
+    lib/preprocess/preprocess_kernel.cu
+  )
+
+  target_link_libraries(${PROJECT_NAME}_lib
+    ${NVINFER}
+    ${NVONNXPARSER}
+    ${CUDA_LIBRARIES}
+    ${CUBLAS_LIBRARIES}
+    ${CUDA_curand_LIBRARY}
+    ${PROJECT_NAME}_cuda_lib
+  )
+
+  target_include_directories(${PROJECT_NAME}_lib
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+      $<INSTALL_INTERFACE:include>
+  )
+
+  # To suppress unknown-pragmas error. The root-cause is CUB library in CUDA 11.6.
+  # This issue was fixed by https://github.com/NVIDIA/cub/commit/7d608bf1dc14553e2fb219eabeed80b76621b6fe
+  target_include_directories(${PROJECT_NAME}_lib
+    SYSTEM PUBLIC
+    ${CUDA_INCLUDE_DIRS}
+  )
+
+  ament_auto_add_library(${PROJECT_NAME}_component SHARED
+    src/lidar_transfusion_node.cpp
+  )
+
+  target_link_libraries(${PROJECT_NAME}_component
+    ${PROJECT_NAME}_lib
+  )
+
+  rclcpp_components_register_node(${PROJECT_NAME}_component
+    PLUGIN "autoware::lidar_transfusion::LidarTransfusionNode"
+    EXECUTABLE ${PROJECT_NAME}_node
+  )
+
+  install(
+    TARGETS ${PROJECT_NAME}_cuda_lib
+    DESTINATION lib
+  )
+
+  if(BUILD_TESTING)
+    find_package(ament_lint_auto REQUIRED)
+    ament_lint_auto_find_test_dependencies()
+
+    find_package(ament_cmake_gtest REQUIRED)
+    ament_auto_add_gtest(test_detection_class_remapper
+      test/test_detection_class_remapper.cpp
+    )
+    ament_auto_add_gtest(test_ros_utils
+      test/test_ros_utils.cpp
+    )
+    ament_auto_add_gtest(test_nms
+      test/test_nms.cpp
+    )
+
+    # Temporary disabled, tracked by:
+    # https://github.com/autowarefoundation/autoware_universe/issues/7724
+    # ament_auto_add_gtest(test_voxel_generator
+    #   test/test_voxel_generator.cpp
+    # )
+
+    # # preprocess kernel test
+    # add_executable(test_preprocess_kernel
+    #   test/test_preprocess_kernel.cpp
+    # )
+    # target_include_directories(test_preprocess_kernel PUBLIC
+    #   ${test_preprocess_kernel_SOURCE_DIR}
+    # )
+    # target_link_libraries(test_preprocess_kernel
+    #   ${PROJECT_NAME}_cuda_lib
+    #   gtest
+    #   gtest_main
+    # )
+    # ament_add_test(test_preprocess_kernel
+    #   GENERATE_RESULT_FOR_RETURN_CODE_ZERO
+    #   COMMAND "$<TARGET_FILE:test_preprocess_kernel>"
+    # )
+
+    # # postprocess kernel test
+    # add_executable(test_postprocess_kernel
+    #   test/test_postprocess_kernel.cpp
+    # )
+    # target_include_directories(test_postprocess_kernel PUBLIC
+    #   ${test_postprocess_kernel_SOURCE_DIR}
+    # )
+    # target_link_libraries(test_postprocess_kernel
+    #   ${PROJECT_NAME}_cuda_lib
+    #   gtest
+    #   gtest_main
+    # )
+    # ament_add_test(test_postprocess_kernel
+    #   GENERATE_RESULT_FOR_RETURN_CODE_ZERO
+    #   COMMAND "$<TARGET_FILE:test_postprocess_kernel>"
+    # )
+
+  endif()
+
+  ament_auto_package(
+    INSTALL_TO_SHARE
+      launch
+      config
+  )
+
+else()
+  find_package(ament_cmake_auto REQUIRED)
+  ament_auto_find_build_dependencies()
+
+  ament_auto_package(
+    INSTALL_TO_SHARE
+      launch
+  )
+endif()

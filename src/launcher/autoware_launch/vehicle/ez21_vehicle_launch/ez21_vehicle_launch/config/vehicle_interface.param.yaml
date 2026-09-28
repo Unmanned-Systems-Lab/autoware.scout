@@ -1,0 +1,29 @@
+ez21_vehicle_interface:
+  ros__parameters:
+    vehicle_id: "default"
+    can_interface: "can0"
+    enable_can_io: true
+    input_qos_depth: 1
+    log_received_messages: false
+    control_mode_request_default_success: true
+    force_report_autonomous_control_mode: true
+    command_period_ms: 20
+    can_receive_timeout_ms: 20
+    wheel_radius_m: 0.2545
+    wheel_base_m: 1.1399
+    velocity_zero_threshold_mps: 0.1
+    steering_center_raw: 15750.0
+    steering_counts_per_radian: 22500.0
+    max_steer_angle_rad: 0.5235987755982988
+    steering_min_speed_deg_per_s: 100.0
+    steering_max_speed_deg_per_s: 540.0
+    fallback_accel_limit_mps2: 2.0
+    fallback_brake_limit_mps2: 3.0
+    overspeed_brake_enabled: true
+    overspeed_brake_deadband_mps: 0.1
+    overspeed_brake_ratio_denominator_min_mps: 0.5
+    overspeed_brake_ratio_points: [0.0, 0.05, 0.1, 0.2, 0.4]
+    overspeed_brake_cmd_points: [0.0, 0.4, 0.5, 0.7, 0.9]
+    drive_current_limit_a: 80.0
+    drive_max_rpm: 640.0
+    throttle_ad_max_raw: 4095.0

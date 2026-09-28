@@ -1,0 +1,41 @@
+# Configuration file for PlatformStatus message
+# 平台状态消息配置文件
+
+PlatformStatus:
+  msg_id: 0x00020001
+  timestamp: 1234567890
+  msg_from: 102
+  ctrl_mode: 2
+  run_mode: 1
+  estop_state: 0
+  warn_level: 2
+  platform_state: 0
+  parking_state: 1
+  power_max: 100
+  speed_max: 50
+  speed_current: 25
+  current_lon: 123456789
+  current_lat: 987654321
+  current_high: 100
+  steer_angle: 500
+  steer_mode: 1
+  steer_faultcode: 0
+  steer_current: 50
+  brake_pressure: 200
+  brake_status: 1
+  brake_fault_level: 0
+  
+  ucmfault_lf: 0
+  ucmfault_lb: 0
+  ucmfault_rf: 0
+  ucmfault_rb: 0
+  
+  ucmfaultcode_lf: 0
+  ucmfaultcode_lb: 0
+  ucmfaultcode_rf: 0
+  ucmfaultcode_rb: 0
+  
+  ucmctemp_lf: 25
+  ucmctemp_lb: 25
+  ucmctemp_rf: 25
+  ucmctemp_rb: 25

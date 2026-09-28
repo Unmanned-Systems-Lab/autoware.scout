@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="M1">
+  <xacro:macro name="M1" params="*origin parent:=base_link name:=m1_lidar">
+    <joint name="${name}_base_mount_joint" type="fixed">
+      <xacro:insert_block name="origin"/>
+      <parent link="${parent}"/>
+      <child link="${name}_base_link"/>
+    </joint>
+
+    <link name="${name}_base_link">
+      <inertial>
+        <origin xyz="0 0 0"/>
+        <mass value="0.5"/>
+        <inertia ixx="1e-3" ixy="0" ixz="0" iyy="1e-3" iyz="0" izz="1e-3"/>
+      </inertial>
+      <visual>
+        <!-- Reuse the vehicle package mesh until a dedicated M1 CAD model is added. -->
+        <geometry>
+          <mesh filename="package://ez21_vehicle_description/mesh/lidar_link_centered.STL" scale="1 1 1"/>
+        </geometry>
+      </visual>
+      <collision>
+        <geometry>
+          <box size="0.18 0.12 0.08"/>
+        </geometry>
+      </collision>
+    </link>
+
+    <joint name="${name}_joint" type="fixed">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <parent link="${name}_base_link"/>
+      <child link="${name}"/>
+    </joint>
+
+    <link name="${name}">
+      <inertial>
+        <origin xyz="0 0 0"/>
+        <mass value="0.01"/>
+        <inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7"/>
+      </inertial>
+    </link>
+  </xacro:macro>
+</robot>

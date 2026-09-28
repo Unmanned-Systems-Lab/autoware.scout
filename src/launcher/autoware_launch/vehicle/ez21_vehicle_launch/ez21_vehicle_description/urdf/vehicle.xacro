@@ -1,0 +1,70 @@
+<?xml version="1.0"?>
+<robot name="ez21_vehicle" xmlns:xacro="http://ros.org/wiki/xacro">
+  <!-- Load geometry-derived parameters to mirror the sample vehicle_description layout. -->
+  <xacro:property
+    name="vehicle_info"
+    value="${xacro.load_yaml('$(find ez21_vehicle_description)/config/vehicle_info.param.yaml')}"/>
+
+  <material name="ez21_vehicle_color">
+    <color rgba="0.79216 0.81961 0.93333 1.0"/>
+  </material>
+
+  <!-- base_link follows the ez12_urdf convention: rear axle center at wheel-axis height. -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://ez21_vehicle_description/mesh/base_link.STL" scale="1 1 1"/>
+      </geometry>
+      <material name="ez21_vehicle_color"/>
+    </visual>
+
+    <visual>
+      <origin xyz="1.13652777671814 0.283679343760014 -0.00147217512130737" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://ez21_vehicle_description/mesh/zq_link_centered.STL" scale="1 1 1"/>
+      </geometry>
+      <material name="ez21_vehicle_color"/>
+    </visual>
+
+    <visual>
+      <origin xyz="1.1433410346508 -0.293077513575554 -0.000711917877197266" rpy="0 ${pi} 0"/>
+      <geometry>
+        <mesh filename="package://ez21_vehicle_description/mesh/yq_link_centered.STL" scale="1 1 1"/>
+      </geometry>
+      <material name="ez21_vehicle_color"/>
+    </visual>
+
+    <visual>
+      <origin xyz="0 -0.269669428467751 0" rpy="0 ${pi} 0"/>
+      <geometry>
+        <mesh filename="package://ez21_vehicle_description/mesh/yh_link_centered.STL" scale="1 1 1"/>
+      </geometry>
+      <material name="ez21_vehicle_color"/>
+    </visual>
+
+    <visual>
+      <origin xyz="0 0.27029374986887 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://ez21_vehicle_description/mesh/zh_link_centered.STL" scale="1 1 1"/>
+      </geometry>
+      <material name="ez21_vehicle_color"/>
+    </visual>
+
+    <visual>
+      <origin xyz="-0.11741312220692635 0.22231443971395493 0.3301381915807724" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://ez21_vehicle_description/mesh/ins_link_centered.STL" scale="1 1 1"/>
+      </geometry>
+      <material name="ez21_vehicle_color"/>
+    </visual>
+
+    <visual>
+      <origin xyz="1.30725860595703 -0.00451123341917992 0.394937843084335" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://ez21_vehicle_description/mesh/lidar_link_centered.STL" scale="1 1 1"/>
+      </geometry>
+      <material name="ez21_vehicle_color"/>
+    </visual>
+  </link>
+</robot>
