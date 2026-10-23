@@ -1,5 +1,16 @@
 # Scout Release Notes
 
+## ELE Publication Target Update (2026-10-23)
+
+The user selected a new independent repository under `multimeters` instead of
+the organization destination listed in RC1. The current dependency manifest
+therefore targets `git@github.com:multimeters/ele_scouts_kit.git`, commit
+`a3b5c3bf4fe48d32311628be58da27efc3d85374`, ELE tag
+`ele-scout-ht-v0.1.0-rc.2`. This only updates publication metadata; HT code
+and the validated checkpoint are unchanged. Repository creation and upload
+still require GitHub account authorization; an SSH key alone cannot create it.
+Existing published release tags are not moved.
+
 ## scout-v0.3.0-ht-rc.1 (2026-10-23)
 
 Branch: `feature/scout-ht-directional-traversability`.

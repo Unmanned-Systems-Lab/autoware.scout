@@ -1,5 +1,5 @@
 repositories:
   ele_scouts_kit:
     type: git
-    url: git@github.com:Unmanned-Systems-Lab/ele_scouts_kit.git
-    version: d94a4ba60dc8743cc857b1d98d2ca5f873105a61
+    url: git@github.com:multimeters/ele_scouts_kit.git
+    version: a3b5c3bf4fe48d32311628be58da27efc3d85374

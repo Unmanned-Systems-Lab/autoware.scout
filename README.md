@@ -25,7 +25,7 @@ Build outputs, downloaded dependencies and maps are not committed.
 ### Separate ELE Scout Dependency
 
 ELE Scout is maintained in its own repository, not copied into Autoware:
-`git@github.com:Unmanned-Systems-Lab/ele_scouts_kit.git`.
+`git@github.com:multimeters/ele_scouts_kit.git`.
 `repositories/scout-external.repos` pins its matching source commit. Once that
 commit is published and accessible, import into a sibling workspace, not `src`:
 

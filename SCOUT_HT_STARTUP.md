@@ -18,7 +18,7 @@ source ./setup_env.bash
 colcon build --symlink-install --packages-select scout_ht_traversability
 ```
 
-ELE 源码独立存放在 `git@github.com:Unmanned-Systems-Lab/ele_scouts_kit.git`，依赖清单为 `repositories/scout-external.repos`，固定提交 `d94a4ba60dc8743cc857b1d98d2ca5f873105a61`。需要该提交已上传且当前 GitHub 身份有读取权限后才能导入：
+ELE 源码的独立发布目标为 `git@github.com:multimeters/ele_scouts_kit.git`，依赖清单为 `repositories/scout-external.repos`，固定提交 `a3b5c3bf4fe48d32311628be58da27efc3d85374`。需要仓库已创建、该提交已上传且当前 GitHub 身份有读取权限后才能导入：
 
 ```bash
 mkdir -p ../scout_dependencies
