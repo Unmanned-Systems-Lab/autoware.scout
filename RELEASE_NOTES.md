@@ -1,5 +1,23 @@
 # Scout Release Notes
 
+## scout-v0.3.0-ht-rc.1 (2026-10-23)
+
+Branch: `feature/scout-ht-directional-traversability`.
+Adds observation-only costmap-first, robot-to-cell directional HT fusion,
+strict map/TF/timestamp checks, diagnostics, an independent perception launcher,
+RViz configuration and the implementation plan/startup guide.
+It does not change the current vehicle's planner/control inputs.
+59 Python tests and the real ELE HT model's isolated synthetic fusion probe passed.
+
+ELE remains a separate source repository at
+`git@github.com:Unmanned-Systems-Lab/ele_scouts_kit.git`.
+The companion branch is `feature/autoware-ht-integration-2026-10-23`, candidate
+tag `ele-scout-ht-v0.1.0-rc.1`, commit
+`d94a4ba60dc8743cc857b1d98d2ca5f873105a61`; 47 focused ELE tests passed.
+Its exact revision is recorded in `repositories/scout-external.repos`; the
+commit must be published there and readable before `vcs import` can retrieve it.
+No ELE source, checkpoint or local build artifacts are vendored into Autoware.
+
 ## scout-v0.2.0-rc.1 (2026-10-23)
 
 Source branch: `release/scout-fixposition-2026-10-23`.

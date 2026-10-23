@@ -22,6 +22,24 @@ The checked-in setup scripts/manifests provide dependency references.
 `SOURCE_VERSIONS.repos` records provenance, not Scout modifications.
 Build outputs, downloaded dependencies and maps are not committed.
 
+### Separate ELE Scout Dependency
+
+ELE Scout is maintained in its own repository, not copied into Autoware:
+`git@github.com:Unmanned-Systems-Lab/ele_scouts_kit.git`.
+`repositories/scout-external.repos` pins its matching source commit. Once that
+commit is published and accessible, import into a sibling workspace, not `src`:
+
+```bash
+mkdir -p ../scout_dependencies
+vcs import ../scout_dependencies < repositories/scout-external.repos
+```
+
+Build ELE separately following its README. `start_scout_ht.bash` prefers the
+installed `../scout_dependencies/ele_scouts_kit`, or accepts an explicit
+`SCOUT_HT_ELE_WORKSPACE`; the existing local deployment remains a fallback.
+The ordinary Autoware launch does not require the optional HT dependency.
+Importing/building this dependency does not start its chassis or sensor drivers.
+
 Local incremental build against an already built matching EZ21 workspace:
 
 ```bash
@@ -41,6 +59,8 @@ uses this mode, not a fresh standalone full-stack build.
 
 For the local launch command and UI address, see [SCOUT_STARTUP.md](SCOUT_STARTUP.md).
 For release branches, tags and validation limits, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
+The optional, observation-only costmap/HT fusion is described in
+[SCOUT_HT_STARTUP.md](SCOUT_HT_STARTUP.md); it does not replace planner inputs.
 
 Standalone Scout UI (local browser only; does not start Autoware, sensors, or chassis):
 

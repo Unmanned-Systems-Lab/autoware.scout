@@ -1,0 +1,20 @@
+scout_costmap_ht_fusion:
+  ros__parameters:
+    base_costmap_topic: /planning/scenario_planning/parking/costmap_generator/occupancy_grid
+    ht_topic: /scout/ht/raw
+    odometry_topic: /localization/kinematic_state
+    output_topic: /scout/traversability/fused_costmap
+    # Matches the current freespace planner, NOT all other costmap consumers.
+    obstacle_threshold: 100
+    # ELE's existing diagnostic threshold; not a field-calibrated execution limit.
+    ht_threshold: 0.15
+    channel_order: [0, 1, 2, 3, 4, 5, 6, 7]
+    heading_offset: 0.0
+    # Only for the matching unshifted ELE Scout checkpoint (SHA256 in the guide).
+    front_reference_offset: 0.4825
+    near_robot_distance: 0.05
+    base_timeout: 1.0
+    ht_timeout: 1.0
+    odometry_timeout: 0.5
+    max_stamp_skew: 0.75
+    update_rate: 5.0
