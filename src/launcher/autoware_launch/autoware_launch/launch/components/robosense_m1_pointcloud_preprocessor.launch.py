@@ -1,3 +1,5 @@
+import math
+
 import yaml
 
 from launch import LaunchDescription
@@ -13,13 +15,18 @@ def get_vehicle_info(context):
     with open(path, "r") as f:
         params = yaml.safe_load(f)["/**"]["ros__parameters"]
 
+    horizontal_margin = float(LaunchConfiguration("self_crop_horizontal_margin_m").perform(context))
+    vertical_margin = float(LaunchConfiguration("self_crop_vertical_margin_m").perform(context))
+    if any(not math.isfinite(value) or value < 0.0 for value in (horizontal_margin, vertical_margin)):
+        raise ValueError("self-crop margins must be finite and nonnegative")
+
     return {
-        "min_longitudinal_offset": -params["rear_overhang"],
-        "max_longitudinal_offset": params["front_overhang"] + params["wheel_base"],
-        "min_lateral_offset": -(params["wheel_tread"] / 2.0 + params["right_overhang"]),
-        "max_lateral_offset": params["wheel_tread"] / 2.0 + params["left_overhang"],
-        "min_height_offset": 0.0,
-        "max_height_offset": params["vehicle_height"],
+        "min_longitudinal_offset": -params["rear_overhang"] - horizontal_margin,
+        "max_longitudinal_offset": params["front_overhang"] + params["wheel_base"] + horizontal_margin,
+        "min_lateral_offset": -(params["wheel_tread"] / 2.0 + params["right_overhang"]) - horizontal_margin,
+        "max_lateral_offset": params["wheel_tread"] / 2.0 + params["left_overhang"] + horizontal_margin,
+        "min_height_offset": -vertical_margin,
+        "max_height_offset": params["vehicle_height"] + vertical_margin,
     }
 
 
@@ -75,6 +82,8 @@ def generate_launch_description():
         [
             DeclareLaunchArgument("pointcloud_container_name", default_value="pointcloud_container"),
             DeclareLaunchArgument("vehicle_param_file"),
+            DeclareLaunchArgument("self_crop_horizontal_margin_m", default_value="0.0"),
+            DeclareLaunchArgument("self_crop_vertical_margin_m", default_value="0.0"),
             DeclareLaunchArgument("input_pointcloud_frame", default_value="m1_lidar"),
             DeclareLaunchArgument("input_frame", default_value="base_link"),
             DeclareLaunchArgument("output_frame", default_value="base_link"),

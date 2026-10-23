@@ -13,6 +13,7 @@
 # limitations under the License.
 import os
 
+from ament_index_python.packages import get_package_share_directory
 import launch
 from launch.actions import DeclareLaunchArgument
 from launch.actions import OpaqueFunction
@@ -539,10 +540,16 @@ def launch_setup(context, *args, **kwargs):
 
     components = []
     if pipeline.use_cuda_ground_segmentation:
+        cuda_param_path = LaunchConfiguration("cuda_ground_segmentation_node_param_path").perform(
+            context
+        )
+        if not cuda_param_path:
+            cuda_param_path = os.path.join(
+                get_package_share_directory("autoware_ground_segmentation_cuda"),
+                "config/cuda_scan_ground_segmentation_filter.param.yaml",
+            )
         ground_segmentation_node_param = ParameterFile(
-            param_file=LaunchConfiguration("cuda_ground_segmentation_node_param_path").perform(
-                context
-            ),
+            param_file=cuda_param_path,
             allow_substs=True,
         )
         components.append(
@@ -647,10 +654,7 @@ def generate_launch_description():
     )
     add_launch_arg(
         "cuda_ground_segmentation_node_param_path",
-        [
-            FindPackageShare("autoware_ground_segmentation_cuda"),
-            "/config/cuda_scan_ground_segmentation_filter.param.yaml",
-        ],
+        "",
     )
 
     set_container_executable = SetLaunchConfiguration(

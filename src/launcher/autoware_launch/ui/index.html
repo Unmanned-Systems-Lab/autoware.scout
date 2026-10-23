@@ -28,8 +28,10 @@
     var defaultMapViewStorageKey = 'autoware_ui_default_map_view';
     var vehicleStateRefreshIntervalMs = 500;
     var defaultUiServerHost = '127.0.0.1';
-    var defaultUiServerPort = 8090;
-    var defaultRemoteWorkspaceRoot = '/mnt/data/xmt200/autoware.ez21';
+    var defaultUiServerPort = parseInt(window.location.port, 10) || 8092;
+    var defaultRemoteWorkspaceRoot = '/mnt/nvme0n1/autoware/autoware.scout';
+    var uiActionsEnabled = false;
+    var mapSwitchInProgress = false;
     var googleMapsApiKey = 'AIzaSyAP6mOp2PxMDAl0nh-fmKEyWYZ1qdpzf7U';
     var googleMapsScriptRequested = false;
     var staticMapPreviewView = null;
@@ -299,7 +301,7 @@
 
       startPointLabel = new google.maps.Marker({
         position: pathPoints[0],
-        label: '起点',
+        label: '首点',
         map: map
       });
 
@@ -540,8 +542,10 @@
       }
 
       if (geoAvailable) {
-        if (geoSource === 'ins_raw_gps') {
-          geoStatusText = '地理位置: INS 原始 GPS';
+        if (geoSource === 'fixposition_llh') {
+          geoStatusText = data.fixposition_ready
+            ? '地理位置: Fixposition GPS'
+            : '地理位置: Fixposition GPS，融合未就绪';
         } else {
           geoStatusText = '地理位置: 已可视化';
         }
@@ -748,28 +752,6 @@
       });
     }
 
-    function syncInsReferencePoint() {
-      return apiRequest('/update_ins_origin', {
-        "command": "current_vehicle_gps"
-      });
-    }
-
-    function syncInsReferencePointFromPath() {
-      setMapStatus('正在将当前机器人 GPS 同步为 INS 参考原点...', false);
-      syncInsReferencePoint()
-        .then(function(result) {
-          var targetLabel = result.target_label || 'INS 参考原点';
-          if (result.status === 'ok') {
-            setMapStatus(targetLabel + '已同步到当前机器人 GPS。', false);
-            return;
-          }
-          throw new Error(result.error || result.message || '未知错误');
-        })
-        .catch(function(error) {
-          setMapStatus('INS 参考原点同步失败: ' + error.message, true);
-        });
-    }
-
     function sendRouteToAutoware() {
       if (pathPoints.length < 2) {
         alert('请至少设置两个路径点');
@@ -790,9 +772,12 @@
           }
 
           var runtimeMap = result.runtime_map || {};
-          var routeSummary = '路线已下发到 Autoware';
+          var routeSummary = '路线已下发到 Autoware，实际起点为车辆当前位置';
           if (runtimeMap.output_dir) {
             routeSummary += '，运行地图目录: ' + runtimeMap.output_dir;
+          }
+          if (result.goal_adjustment_m > 0) {
+            routeSummary += '，终点沿车道内缩 ' + result.goal_adjustment_m.toFixed(2) + ' 米';
           }
           setRuntimeStatus(routeSummary + '。', false);
         })
@@ -940,38 +925,101 @@
       }
 
       generateButton.disabled = true;
-      setMapStatus('正在生成地图并刷新 Autoware 车道线，不更新 INS 参考 GPS...', false);
+      mapSwitchInProgress = true;
+      setMapStatus('正在生成并切换 Scout 地图，请保持车辆停止...', false);
 
       apiRequest('/generate_map', {
         "command": "waypoint",
-        "map_name": liveAutowareMapName,
+        "map_name": "scout_fp_enu0_" + Date.now(),
         "reload_autoware": true,
+        "use_live_fp_enu0_origin": true,
         "update_ins_origin": false,
         "data": buildWaypointPayload()
       })
         .then(function(data) {
-          var reloadResult = data.autoware_reload || {};
-
-          if (reloadResult.status === 'ok') {
-            setMapStatus((reloadResult.message || '已刷新 Autoware 地图') + '，当前地图目录: ' + data.output_dir, false);
-            return;
+          var reload = data.autoware_reload || {};
+          if (reload.status !== 'ok') {
+            throw new Error(reload.error || '地图已生成，但 Autoware 未完成切换；请检查运行日志');
           }
-
-          if (reloadResult.status === 'error') {
-            setMapStatus('地图已生成，但刷新 Autoware 失败: ' + (reloadResult.error || '未知错误'), true);
-            return;
-          }
-
-          setMapStatus('地图已生成到: ' + data.output_dir, false);
+          liveAutowareMapName = data.map_name;
+          setMapStatus('Scout 地图已切换到: ' + data.output_dir, false);
+          setRuntimeStatus('已清除旧路线，Autoware 正在使用新地图。请重新检查定位和路线。', false);
+          refreshGeneratedMaps();
         })
         .catch(function(error) {
           setMapStatus('地图生成或刷新失败: ' + error.message, true);
-          alert('地图生成失败: ' + error.message + '\n请先运行 /media/nvidia/program/autoware.ez21/src/launcher/autoware_launch_ez21/ui/generate_autoware_map.py');
+          alert('地图生成失败: ' + error.message);
         })
         .finally(function() {
-          generateButton.disabled = false;
+          mapSwitchInProgress = false;
+          generateButton.disabled = !uiActionsEnabled;
           refreshAutowareStatus();
         });
+    }
+
+    function refreshGeneratedMaps() {
+      var selector = document.getElementById('generated-map-select');
+      var previous = selector.value;
+      apiRequest('/generated_maps', null, 'GET').then(function(data) {
+        selector.replaceChildren();
+        (data.maps || []).forEach(function(item) {
+          var option = document.createElement('option');
+          option.value = item.map_name;
+          option.textContent = item.map_name + (item.active ? ' (当前)' : '');
+          option.disabled = !item.compatible_with_fp_enu0;
+          selector.appendChild(option);
+        });
+        var preferred = Array.from(selector.options).find(function(option) {
+          return option.value === previous && !option.disabled;
+        }) || Array.from(selector.options).find(function(option) {
+          return !option.disabled;
+        });
+        if (preferred) {
+          selector.value = preferred.value;
+        } else {
+          selector.selectedIndex = -1;
+        }
+        document.getElementById('activate-map-button').disabled = !uiActionsEnabled || mapSwitchInProgress || !preferred;
+      }).catch(function(error) {
+        setMapStatus('读取已有地图失败: ' + error.message + '。若刚更新程序，请先重启一次 Autoware 和 UI。', true);
+      });
+    }
+
+    function activateGeneratedMap() {
+      var selector = document.getElementById('generated-map-select');
+      var button = document.getElementById('activate-map-button');
+      if (!selector.value || button.disabled) {
+        return;
+      }
+      button.disabled = true;
+      mapSwitchInProgress = true;
+      setMapStatus('正在切换到已有地图，请保持车辆停止...', false);
+      apiRequest('/activate_map', {"map_name": selector.value}).then(function(data) {
+        var reload = data.autoware_reload || {};
+        if (data.status !== 'ok' || reload.status !== 'ok') {
+          throw new Error(reload.error || '地图切换未完成');
+        }
+        liveAutowareMapName = data.map_name;
+        setMapStatus('正在使用地图: ' + data.output_dir, false);
+        setRuntimeStatus('旧路线已清除。请重新检查定位、车道和路线。', false);
+      }).catch(function(error) {
+        setMapStatus('加载已有地图失败: ' + error.message, true);
+      }).finally(function() {
+        mapSwitchInProgress = false;
+        refreshGeneratedMaps();
+        refreshAutowareStatus();
+      });
+    }
+
+    function setVehicleActionsEnabled(enabled) {
+      uiActionsEnabled = enabled;
+      ['send-route-button', 'generate-autoware-map-button', 'enter-autonomous-button'].forEach(function(id) {
+        document.getElementById(id).disabled = !enabled || mapSwitchInProgress;
+      });
+      document.getElementById('activate-map-button').disabled = !enabled || mapSwitchInProgress || !document.getElementById('generated-map-select').value;
+      if (enabled) {
+        document.getElementById('runtime-status').textContent = '车辆动作已启用。';
+      }
     }
 
     function updateAutowareStatusPanel(data) {
@@ -979,6 +1027,10 @@
       var routeState = data.route_state || {};
       var services = data.services || {};
       var runtimeMap = data.runtime_map || {};
+
+      if (uiActionsEnabled !== !!data.ui_actions_enabled) {
+        setVehicleActionsEnabled(!!data.ui_actions_enabled);
+      }
 
       document.getElementById('autoware-availability').textContent = '后端: 已连接';
       document.getElementById('autoware-mode').textContent = '运行模式: ' + (operationMode.label || 'UNKNOWN');
@@ -997,7 +1049,8 @@
 
       if (runtimeMap.status === 'ok') {
         document.getElementById('runtime-map-context').textContent =
-          '运行地图: ' + runtimeMap.output_dir + ' | origin 来源: ' + runtimeMap.origin_source;
+          (data.map_switch_failed ? '地图切换失败，路线已禁用 | ' : '运行地图: ') +
+          runtimeMap.output_dir + ' | origin 来源: ' + runtimeMap.origin_source;
         scheduleResponsiveUiUpdate();
         return;
       }
@@ -1013,6 +1066,7 @@
           updateAutowareStatusPanel(data);
         })
         .catch(function(error) {
+          setVehicleActionsEnabled(false);
           document.getElementById('autoware-availability').textContent =
             '后端: 连接失败 - ' + error.message;
           document.getElementById('runtime-map-context').textContent =
@@ -1039,6 +1093,7 @@
 
       refreshVehicleState();
       refreshAutowareStatus();
+      refreshGeneratedMaps();
       vehicleStateTimer = window.setInterval(refreshVehicleState, vehicleStateRefreshIntervalMs);
       autowareStatusTimer = window.setInterval(refreshAutowareStatus, 1500);
     });
@@ -1180,6 +1235,14 @@
       opacity: 0.6;
     }
 
+    #generated-map-select {
+      min-width: 0;
+      width: 100%;
+      margin-top: calc(8px * var(--ui-scale));
+      padding: calc(5px * var(--ui-scale));
+      box-sizing: border-box;
+    }
+
     .crosshair-cursor,
     .crosshair-cursor #google-map {
       cursor: crosshair;
@@ -1285,22 +1348,21 @@
   <div id="toolbar">
     <button id="set-path-button" class="large-button" onclick="toggleSetPath()">设置路径</button>
     <button class="large-button" onclick="addCurrentVehiclePositionAsPathPoint()">添加当前位置</button>
-    <button class="large-button" onclick="sendRouteToAutoware()">下发路线</button>
+    <button id="send-route-button" class="large-button" onclick="sendRouteToAutoware()" disabled title="当前为只读模式">下发路线</button>
     <button class="large-button" onclick="clearAutowareRoute()">清除路线</button>
     <button class="large-button" onclick="resetAutoware()">复位</button>
-    <button class="large-button" onclick="syncInsReferencePointFromPath()">同步定位原点</button>
-    <button id="generate-autoware-map-button" class="large-button" onclick="generateAutowareMap()">生成并刷新地图</button>
-    <button class="large-button" onclick="enterAutonomousMode()">进入自动</button>
+    <button id="generate-autoware-map-button" class="large-button" onclick="generateAutowareMap()" disabled title="当前为只读模式">生成 Scout 地图</button>
+    <button id="enter-autonomous-button" class="large-button" onclick="enterAutonomousMode()" disabled title="当前为只读模式">进入自动</button>
     <button class="large-button" onclick="stopAutoware()">STOP</button>
     <button class="large-button" onclick="clearPathPreview()">清空选点</button>
   </div>
 
   <div id="status-stack">
   <div id="map-status" class="status-panel">
-    地图工具会生成并刷新 `autoware_init_map`；如需更新 INS 参考原点，请单独点击“同步定位原点”（使用当前机器人 GPS）。
+    地图原点须与 Fixposition FP_ENU0 对齐。
   </div>
   <div id="runtime-status" class="status-panel">
-    运行时路线通过 ADAPI 下发给 Autoware；进入自动会依次请求 AUTONOMOUS 和 Autoware control。
+    当前为只读模式，车辆动作已禁用。
   </div>
   </div>
 
@@ -1339,6 +1401,8 @@
     <div id="autoware-route-state">路线状态: N/A</div>
     <div id="autoware-services">服务就绪: N/A</div>
     <div id="runtime-map-context">运行地图: N/A</div>
+    <select id="generated-map-select" aria-label="已生成地图" onfocus="refreshGeneratedMaps()"></select>
+    <button id="activate-map-button" class="large-button" onclick="activateGeneratedMap()" disabled>加载地图</button>
   </div>
 
   <div id="local-panel" class="floating-panel panel-local">

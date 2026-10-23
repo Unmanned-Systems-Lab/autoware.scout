@@ -12,8 +12,10 @@
       <remap from="/tf" to="/fixposition/tf"/>
       <remap from="/tf_static" to="/fixposition/tf_static"/>
     </node>
-    <node pkg="rslidar_sdk" exec="rslidar_sdk_node" name="rslidar_sdk" output="screen">
+    <node pkg="rslidar_sdk" exec="rslidar_sdk_node" output="screen">
       <param name="config_path" value="$(var rslidar_config)"/>
+      <!-- Scope the rename to the parameter node; the SDK also creates publisher nodes. -->
+      <remap from="param_handle:__node" to="rslidar_sdk"/>
     </node>
   </group>
 </launch>

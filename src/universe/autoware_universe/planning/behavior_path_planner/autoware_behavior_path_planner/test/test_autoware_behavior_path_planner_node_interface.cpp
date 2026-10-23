@@ -15,6 +15,8 @@
 #include "autoware/behavior_path_planner/behavior_path_planner_node.hpp"
 #include "autoware/behavior_path_planner/test_utils.hpp"
 
+#include <autoware_test_utils/autoware_test_utils.hpp>
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -67,6 +69,24 @@ TEST(PlanningModuleInterfaceTest, NodeTestWithOffTrackEgoPose)
 
   ASSERT_NO_THROW_WITH_ERROR_MSG(
     test_manager->testWithOffTrackOdometry(test_target_node, input_odometry_topic));
+
+  rclcpp::shutdown();
+}
+
+TEST(PlanningModuleInterfaceTest, MapReplacementClearsPreviousRoute)
+{
+  rclcpp::init(0, nullptr);
+
+  auto test_manager = generateTestManager();
+  auto test_target_node = generateNode({}, {});
+  publishMandatoryTopics(test_manager, test_target_node);
+
+  ASSERT_NO_THROW_WITH_ERROR_MSG(test_manager->testWithBehaviorNormalRoute(
+    test_target_node, "behavior_path_planner/input/route"));
+  EXPECT_GE(test_manager->getReceivedTopicNum(), 1);
+  ASSERT_NO_THROW_WITH_ERROR_MSG(test_manager->publishInput(
+    test_target_node, "behavior_path_planner/input/vector_map",
+    autoware::test_utils::makeMapBinMsg("autoware_test_utils", "intersection/lanelet2_map.osm")));
 
   rclcpp::shutdown();
 }

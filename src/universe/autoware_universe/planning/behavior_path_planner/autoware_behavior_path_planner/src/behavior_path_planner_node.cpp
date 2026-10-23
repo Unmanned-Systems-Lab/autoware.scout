@@ -318,6 +318,26 @@ void BehaviorPathPlannerNode::run()
 
   takeData();
 
+  if (has_received_map_) {
+    const auto map = map_ptr_;
+    has_received_map_ = false;
+
+    std::unique_lock<std::mutex> lk_pd(mutex_pd_);
+    std::unique_lock<std::mutex> lk_manager(mutex_manager_);
+    if (map_loaded_once_) {
+      planner_manager_->reset();
+      planner_data_->route_handler->clearRoute();
+      planner_data_->prev_route_id.reset();
+      planner_data_->prev_modified_goal.reset();
+      planner_data_->prev_output_path = std::make_shared<PathWithLaneId>();
+      route_ptr_.reset();
+      has_received_route_ = false;
+      RCLCPP_WARN(get_logger(), "Map changed; waiting for a new route before planning");
+    }
+    planner_data_->route_handler->setMap(*map);
+    map_loaded_once_ = true;
+  }
+
   if (!isDataReady()) {
     return;
   }
@@ -327,16 +347,6 @@ void BehaviorPathPlannerNode::run()
   // behavior_path_planner runs only in LANE DRIVING scenario.
   if (current_scenario_->current_scenario != Scenario::LANEDRIVING) {
     return;
-  }
-
-  // check for map update
-  LaneletMapBin::ConstSharedPtr map_ptr{nullptr};
-  {
-    if (has_received_map_) {
-      // Note: duplicating the shared_ptr prevents the data from being deleted by another thread!
-      map_ptr = map_ptr_;
-      has_received_map_ = false;
-    }
   }
 
   // check for route update
@@ -350,11 +360,6 @@ void BehaviorPathPlannerNode::run()
   }
 
   std::unique_lock<std::mutex> lk_pd(mutex_pd_);  // for planner_data_
-
-  // update map
-  if (map_ptr) {
-    planner_data_->route_handler->setMap(*map_ptr);
-  }
 
   std::unique_lock<std::mutex> lk_manager(mutex_manager_);  // for planner_manager_
 
@@ -374,6 +379,11 @@ void BehaviorPathPlannerNode::run()
       planner_manager_->resetCurrentRouteLanelet(planner_data_);
       planner_data_->prev_modified_goal.reset();
     }
+  }
+  if (!planner_data_->route_handler->isHandlerReady()) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 5000, "Waiting for a route compatible with the current map");
+    return;
   }
   const auto controlled_by_autoware_autonomously =
     planner_data_->operation_mode->mode == OperationModeState::AUTONOMOUS &&

@@ -99,7 +99,7 @@
 
   <!-- Start the runtime route/HMI UI early so the page is available while the rest of Autoware boots. -->
   <executable
-    cmd="bash $(var ui_launcher) $(var ui_host) $(var ui_port) $(var open_ui_index)"
+    cmd="bash $(var ui_launcher) $(var ui_host) $(var ui_port) $(var open_ui_index) $(var map_path)"
     name="autoware_runtime_ui"
     output="screen"
     if="$(var launch_ui)"

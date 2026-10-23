@@ -132,6 +132,7 @@ private:
   LaneletRoute::ConstSharedPtr route_ptr_{nullptr};
   bool has_received_map_{false};
   bool has_received_route_{false};
+  bool map_loaded_once_{false};
 
   std::shared_ptr<PlannerManager> planner_manager_;
 

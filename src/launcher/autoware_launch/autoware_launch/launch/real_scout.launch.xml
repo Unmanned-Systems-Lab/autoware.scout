@@ -56,6 +56,8 @@
   <arg name="localization_base_link_to_ins_yaw" default="0.0" description="Scout INS mounting yaw in base_link [rad]"/>
 
   <!-- Perception -->
+  <arg name="pointcloud_self_crop_horizontal_margin_m" default="0.10" description="horizontal padding around the Scout body for ego-return removal [m]"/>
+  <arg name="pointcloud_self_crop_vertical_margin_m" default="0.05" description="vertical padding around the Scout body for ego-return removal [m]"/>
   <arg name="perception_mode" default="lidar" description="perception mode"/>
   <arg name="use_traffic_light_recognition" default="false" description="disable traffic light recognition for lidar-only perception"/>
   <arg
@@ -186,6 +188,8 @@
   <include file="$(find-pkg-share autoware_launch)/launch/components/robosense_m1_pointcloud_preprocessor.launch.py">
     <arg name="pointcloud_container_name" value="$(var pointcloud_container_name)"/>
     <arg name="vehicle_param_file" value="$(var vehicle_param_file)"/>
+    <arg name="self_crop_horizontal_margin_m" value="$(var pointcloud_self_crop_horizontal_margin_m)"/>
+    <arg name="self_crop_vertical_margin_m" value="$(var pointcloud_self_crop_vertical_margin_m)"/>
     <arg name="input_frame" value="base_link"/>
     <arg name="output_frame" value="base_link"/>
     <arg name="input_pointcloud" value="/rslidar_points"/>

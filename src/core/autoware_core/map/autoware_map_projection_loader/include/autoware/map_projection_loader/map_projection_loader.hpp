@@ -34,6 +34,7 @@ public:
 private:
   using MapProjectorInfo = autoware::component_interface_specs::map::MapProjectorInfo;
   rclcpp::Publisher<MapProjectorInfo::Message>::SharedPtr publisher_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback_;
 };
 }  // namespace autoware::map_projection_loader
 

@@ -10,7 +10,12 @@ WORKSPACE_INSTALL_PREFIX="${WORKSPACE_ROOT}/install"
 HOST="${1:-127.0.0.1}"
 PORT="${2:-8090}"
 OPEN_INDEX="${3:-false}"
+RUNTIME_MAP_DIR="${4:-}"
 SERVER_PID=""
+
+if [[ -n "${RUNTIME_MAP_DIR}" ]]; then
+  export AUTOWARE_UI_RUNTIME_MAP_DIR="${RUNTIME_MAP_DIR}"
+fi
 
 healthcheck_url() {
   echo "http://$(browser_host):${PORT}/health"
@@ -148,8 +153,19 @@ stop_stale_ui_server_on_port() {
 
 cleanup() {
   local exit_code=$?
+  local _=0
+  trap - EXIT INT TERM
   if [[ -n "${SERVER_PID}" ]] && kill -0 "${SERVER_PID}" >/dev/null 2>&1; then
     kill "${SERVER_PID}" >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do
+      if ! kill -0 "${SERVER_PID}" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.1
+    done
+    if kill -0 "${SERVER_PID}" >/dev/null 2>&1; then
+      kill -KILL "${SERVER_PID}" >/dev/null 2>&1 || true
+    fi
     wait "${SERVER_PID}" >/dev/null 2>&1 || true
   fi
   exit "${exit_code}"

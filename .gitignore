@@ -29,3 +29,6 @@ capture/
 
 # Node.js
 node_modules/
+
+# Site-specific UI output; regenerate against the live Fixposition origin.
+/src/launcher/autoware_launch/ui/generated_maps/

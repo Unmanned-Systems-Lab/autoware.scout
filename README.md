@@ -39,6 +39,39 @@ uses this mode, not a fresh standalone full-stack build.
 
 ## Run
 
+For the local launch command and UI address, see [SCOUT_STARTUP.md](SCOUT_STARTUP.md).
+For release branches, tags and validation limits, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
+
+Standalone Scout UI (local browser only; does not start Autoware, sensors, or chassis):
+
+```bash
+SCOUT_UI_ROS_DOMAIN_ID=187 ./run_scout_ui.sh
+# http://127.0.0.1:8092/index.html
+```
+
+Use the same ROS domain and Fast DDS settings for the Scout stack. The standalone
+launcher keeps vehicle actions disabled. The UI reads Fixposition LLH from
+`/fixposition/odometry_llh`, Fixposition status from `/fixposition/fpa/odomstatus`,
+and map-frame speed/pose from `/localization/kinematic_state`. It only shows
+map-frame pose and speed when Fixposition reports a recent global initialization
+and GNSS fix. The old CAN INS origin control is unavailable. The UI's "Generate
+Scout map" action reads the current `FP_ECEF -> FP_ENU0` transform only with a
+recent global initialization and GNSS fix. It writes a new map under
+`src/launcher/autoware_launch/ui/generated_maps/scout_fp_enu0_*` and, when the
+vehicle is stationary in STOP with Autoware control disabled, switches the
+running Lanelet2 and pointcloud loaders to it without restarting Autoware.
+Existing routes are cleared. The new map must align with the live Fixposition
+`FP_ENU0` origin. The runtime projection loader updates the projection when
+switching away from a stale startup map; the vehicle must remain stopped with
+Autoware control disabled.
+A failed switch blocks route and autonomous commands until a successful retry
+or restart. The startup-only map hash service still reports the original map
+hash after a hot switch; use the UI runtime-map status for the active map path.
+The Fixposition
+`FP_ENU0` origin may change after a sensor restart, so verify it against the
+map's `map_projector_info.yaml` every time. A generated lanelet/flat pointcloud
+map is not a surveyed drivable map and must be validated before vehicle motion.
+
 Prepare SocketCAN according to the actual chassis configuration. Verify emergency
 stop, manual takeover and surroundings before enabling hardware. This starts real
 hardware drivers:

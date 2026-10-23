@@ -16,6 +16,8 @@
 
 #include "autoware/map_projection_loader/load_info_from_lanelet2_map.hpp"
 
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
+
 #include <autoware_map_msgs/msg/map_projector_info.hpp>
 
 #include <yaml-cpp/yaml.h>
@@ -23,7 +25,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace autoware::map_projection_loader
 {
@@ -123,6 +127,7 @@ MapProjectionLoader::MapProjectionLoader(const rclcpp::NodeOptions & options)
   const std::string yaml_filename = this->declare_parameter<std::string>("map_projector_info_path");
   const std::string lanelet2_map_filename =
     this->declare_parameter<std::string>("lanelet2_map_path");
+  this->declare_parameter<bool>("supports_runtime_reload", true);
 
   const autoware_map_msgs::msg::MapProjectorInfo msg =
     load_map_projector_info(yaml_filename, lanelet2_map_filename);
@@ -131,6 +136,40 @@ MapProjectionLoader::MapProjectionLoader(const rclcpp::NodeOptions & options)
   publisher_ = this->create_publisher<MapProjectorInfo::Message>(
     MapProjectorInfo::name, autoware::component_interface_specs::get_qos<MapProjectorInfo>());
   publisher_->publish(msg);
+
+  parameter_callback_ =
+    this->add_on_set_parameters_callback([this](const std::vector<rclcpp::Parameter> & parameters) {
+      rcl_interfaces::msg::SetParametersResult result;
+      result.successful = true;
+      std::optional<std::string> new_projector_path;
+      for (const auto & parameter : parameters) {
+        if (parameter.get_name() == "supports_runtime_reload") {
+          result.successful = false;
+          result.reason = "supports_runtime_reload is read-only";
+          return result;
+        }
+        if (parameter.get_name() == "map_projector_info_path") {
+          if (parameter.get_type() != rclcpp::ParameterType::PARAMETER_STRING) {
+            result.successful = false;
+            result.reason = "map_projector_info_path must be a string";
+            return result;
+          }
+          new_projector_path = parameter.as_string();
+        }
+      }
+      if (new_projector_path) {
+        try {
+          const auto new_info = load_map_projector_info(
+            *new_projector_path, this->get_parameter("lanelet2_map_path").as_string());
+          publisher_->publish(new_info);
+        } catch (const std::exception & error) {
+          result.successful = false;
+          result.reason = error.what();
+          return result;
+        }
+      }
+      return result;
+    });
 }
 }  // namespace autoware::map_projection_loader
 

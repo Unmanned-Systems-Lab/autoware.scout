@@ -1,15 +1,65 @@
+import importlib.util
 from pathlib import Path
 import subprocess
 import unittest
 import xml.etree.ElementTree as ET
 
 import yaml
+from launch import LaunchContext
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class ScoutLayoutTest(unittest.TestCase):
+    def self_crop_bounds(self, horizontal_margin, vertical_margin):
+        path = ROOT / "src/launcher/autoware_launch/autoware_launch/launch/components/robosense_m1_pointcloud_preprocessor.launch.py"
+        spec = importlib.util.spec_from_file_location("scout_pointcloud_preprocessor", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        context = LaunchContext()
+        context.launch_configurations.update({
+            "vehicle_param_file": str(ROOT / "src/vehicle/scout_vehicle_description/config/vehicle_info.param.yaml"),
+            "self_crop_horizontal_margin_m": str(horizontal_margin),
+            "self_crop_vertical_margin_m": str(vertical_margin),
+        })
+        return module.get_vehicle_info(context)
+
+    def test_self_crop_removes_body_edge_returns_but_preserves_outside_points(self):
+        root = ET.parse(ROOT / "src/launcher/autoware_launch/autoware_launch/launch/real_scout.launch.xml").getroot()
+        args = {arg.attrib["name"]: arg.attrib.get("default") for arg in root.findall("arg")}
+        horizontal = args["pointcloud_self_crop_horizontal_margin_m"]
+        vertical = args["pointcloud_self_crop_vertical_margin_m"]
+        bounds = self.self_crop_bounds(horizontal, vertical)
+        minimum = [bounds[key] for key in ("min_longitudinal_offset", "min_lateral_offset", "min_height_offset")]
+        maximum = [bounds[key] for key in ("max_longitudinal_offset", "max_lateral_offset", "max_height_offset")]
+        for actual, expected in zip(minimum + maximum, [-0.3135, -0.449795, -0.05, 0.8115, 0.449795, 1.0]):
+            self.assertAlmostEqual(actual, expected)
+        def removed(point):
+            return all(low <= value <= high for value, low, high in zip(point, minimum, maximum))
+        self.assertTrue(removed((0.42, 0.365, 0.61)))
+        self.assertTrue(removed((0.42, -0.43, 0.61)))
+        self.assertFalse(removed((0.42, 0.50, 0.61)))
+        self.assertFalse(removed((0.90, 0.0, 0.61)))
+        self.assertFalse(removed((0.42, 0.0, 1.10)))
+        include = next(node for node in root.findall("include")
+                       if "robosense_m1_pointcloud_preprocessor" in node.attrib["file"])
+        forwarded = {arg.attrib["name"]: arg.attrib["value"] for arg in include.findall("arg")}
+        self.assertEqual(forwarded["self_crop_horizontal_margin_m"], "$(var pointcloud_self_crop_horizontal_margin_m)")
+        self.assertEqual(forwarded["self_crop_vertical_margin_m"], "$(var pointcloud_self_crop_vertical_margin_m)")
+
+    def test_self_crop_zero_margin_keeps_original_vehicle_bounds(self):
+        bounds = self.self_crop_bounds(0.0, 0.0)
+        self.assertEqual(bounds["min_longitudinal_offset"], -0.2135)
+        self.assertEqual(bounds["max_longitudinal_offset"], 0.7115)
+        self.assertAlmostEqual(bounds["max_lateral_offset"], 0.349795)
+
+    def test_self_crop_rejects_invalid_margins(self):
+        for horizontal, vertical in ((-0.1, 0.0), (0.1, -0.05), ("nan", 0.0), (0.0, "inf")):
+            with self.subTest(horizontal=horizontal, vertical=vertical):
+                with self.assertRaisesRegex(ValueError, "finite and nonnegative"):
+                    self.self_crop_bounds(horizontal, vertical)
+
     def test_combined_model_and_extrinsics(self):
         model = subprocess.check_output([
             "xacro", str(ROOT / "src/launcher/autoware_launch/tier4_universe_launch/"

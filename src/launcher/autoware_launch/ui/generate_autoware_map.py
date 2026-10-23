@@ -5,6 +5,7 @@ import errno
 import io
 import json
 import math
+import os
 import re
 import shlex
 import subprocess
@@ -29,6 +30,8 @@ from autoware_adapi_v1_msgs.srv import SetRoutePoints
 from autoware_planning_msgs.msg import LaneletRoute
 from autoware_planning_msgs.msg import Trajectory
 from autoware_localization_msgs.srv import InitializeLocalization
+from autoware_map_msgs.msg import LaneletMapBin
+from fixposition_driver_msgs.msg import FpaOdomstatus
 from geometry_msgs.msg import Point
 from geometry_msgs.msg import Pose
 from geometry_msgs.msg import PoseWithCovarianceStamped
@@ -41,12 +44,15 @@ from rcl_interfaces.msg import ParameterType
 from rcl_interfaces.srv import GetParameters
 from rcl_interfaces.srv import SetParametersAtomically
 from rclpy.node import Node
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy
 from rclpy.qos import QoSProfile
 from rclpy.qos import ReliabilityPolicy
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import NavSatFix
 from std_msgs.msg import ColorRGBA
+from tf2_msgs.msg import TFMessage
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
 
@@ -68,9 +74,11 @@ INS_DRIVER_INSTALL_CONFIG_PATH = (
 DEFAULT_MAP_NAME = "autoware_init_map"
 DEFAULT_OUTPUT_ROOT = SCRIPT_DIR / "generated_maps"
 AUTOWARE_MAP_RELOAD_TOPIC = "/map/map_projector_info"
+AUTOWARE_MAP_PROJECTION_LOADER_NODE = "/map/map_projection_loader"
 AUTOWARE_MAP_RELOAD_TIMEOUT_S = 20.0
 AUTOWARE_MAP_COMPONENT_RELOAD_TIMEOUT_S = 30.0
 AUTOWARE_MAP_CONTAINER = "/map/map_container"
+AUTOWARE_LANELET_MAP_LOADER_NODE = "/map/lanelet2_map_loader"
 AUTOWARE_POINTCLOUD_MAP_TOPIC = "/map/pointcloud_map"
 AUTOWARE_POINTCLOUD_MAP_METADATA_TOPIC = "/map/pointcloud_map_metadata"
 AUTOWARE_POINTCLOUD_MAP_LOADER_NODE = "/map/pointcloud_map_loader"
@@ -94,10 +102,11 @@ DEFAULT_SATELLITE_SAMPLE_ROWS = 64
 DEFAULT_SATELLITE_MARKER_ALPHA = 0.85
 DEFAULT_SATELLITE_MARKER_Z_M = -0.05
 DEFAULT_LANE_EXTRA_MARGIN_M = 1.0
+GENERATED_LANE_START_BACKWARD_MARGIN_M = 5.0
 DEFAULT_ELEVATION_M = 0.0
-DEFAULT_SPEED_LIMIT_KPH = 10.0
-DEFAULT_MIN_TURN_RADIUS_M = 5.5
-DEFAULT_TURN_ARC_STEP_M = 1.0
+DEFAULT_SPEED_LIMIT_KPH = 3.6
+SCOUT_MAX_YAW_RATE_RADPS = 0.8
+DEFAULT_TURN_ARC_STEP_M = 0.2
 DEFAULT_PCD_LONGITUDINAL_STEP_M = 1.0
 DEFAULT_PCD_LATERAL_STEP_M = 0.5
 AUTOWARE_ROUTE_SET_SERVICE = "/api/routing/set_route_points"
@@ -116,7 +125,13 @@ AUTOWARE_ENABLE_CONTROL_SERVICE = "/api/operation_mode/enable_autoware_control"
 AUTOWARE_DISABLE_CONTROL_SERVICE = "/api/operation_mode/disable_autoware_control"
 AUTOWARE_LOCALIZATION_INITIALIZE_SERVICE = "/localization/initialize"
 AUTOWARE_LOCALIZATION_KINEMATIC_STATE_TOPIC = "/localization/kinematic_state"
-INS_RAW_GPS_TOPIC = "/sensing/ins/raw_nav_sat_fix"
+FIXPOSITION_LLH_TOPIC = "/fixposition/odometry_llh"
+FIXPOSITION_STATUS_TOPIC = "/fixposition/fpa/odomstatus"
+FIXPOSITION_STATIC_TF_TOPIC = "/fixposition/tf_static"
+FIXPOSITION_DATA_TIMEOUT_S = 2.0
+SCOUT_UI_ALLOW_VEHICLE_ACTIONS = os.environ.get("SCOUT_UI_ALLOW_VEHICLE_ACTIONS", "0") == "1"
+MAP_SWITCH_LOCK = threading.Lock()
+MAP_SWITCH_FAILED = False
 AUTOWARE_ROUTE_SERVICE_TIMEOUT_S = 10.0
 AUTOWARE_OPERATION_MODE_TIMEOUT_S = 5.0
 AUTOWARE_LOCALIZATION_TIMEOUT_S = 5.0
@@ -166,6 +181,17 @@ class GeoPoint:
     latitude: float
     longitude: float
     altitude: float
+
+
+def geo_point_from_ecef(ecef: tuple[float, float, float]) -> GeoPoint:
+    if not all(math.isfinite(value) for value in ecef):
+        raise MapGenerationError("FP_ENU0 ECEF origin contains non-finite coordinates")
+    if not 6_000_000.0 <= math.sqrt(sum(value * value for value in ecef)) <= 7_000_000.0:
+        raise MapGenerationError("FP_ENU0 ECEF origin is outside the expected Earth radius")
+    longitude, latitude, altitude = Transformer.from_crs(
+        "EPSG:4978", "EPSG:4979", always_xy=True
+    ).transform(*ecef)
+    return GeoPoint(latitude=latitude, longitude=longitude, altitude=altitude)
 
 
 @dataclass(frozen=True)
@@ -548,12 +574,17 @@ class AutowareRuntimeClient:
         self._operation_mode_state_subscription = None
         self._kinematic_state_subscription = None
         self._raw_gps_subscription = None
+        self._fixposition_status_subscription = None
+        self._fixposition_static_tf_subscription = None
         self._route_state: RouteState | None = None
         self._operation_mode_state: OperationModeState | None = None
         self._kinematic_state: Odometry | None = None
         self._kinematic_state_received_monotonic: float | None = None
         self._raw_gps: NavSatFix | None = None
         self._raw_gps_received_monotonic: float | None = None
+        self._fixposition_status: FpaOdomstatus | None = None
+        self._fixposition_status_received_monotonic: float | None = None
+        self._fixposition_enu0_ecef: tuple[float, float, float] | None = None
         self._initialized = False
 
     def _ensure_ready(self) -> None:
@@ -582,6 +613,11 @@ class AutowareRuntimeClient:
             self._operation_mode_state_subscription = None
             self._kinematic_state_subscription = None
             self._raw_gps_subscription = None
+            self._fixposition_status_subscription = None
+            self._fixposition_static_tf_subscription = None
+            self._fixposition_status = None
+            self._fixposition_status_received_monotonic = None
+            self._fixposition_enu0_ecef = None
             self._initialized = False
 
             if not rclpy.ok():
@@ -634,9 +670,21 @@ class AutowareRuntimeClient:
             )
             self._raw_gps_subscription = self._node.create_subscription(
                 NavSatFix,
-                INS_RAW_GPS_TOPIC,
+                FIXPOSITION_LLH_TOPIC,
                 self._on_raw_gps,
-                10,
+                qos_profile_sensor_data,
+            )
+            self._fixposition_status_subscription = self._node.create_subscription(
+                FpaOdomstatus,
+                FIXPOSITION_STATUS_TOPIC,
+                self._on_fixposition_status,
+                qos_profile_sensor_data,
+            )
+            self._fixposition_static_tf_subscription = self._node.create_subscription(
+                TFMessage,
+                FIXPOSITION_STATIC_TF_TOPIC,
+                self._on_fixposition_static_tf,
+                status_qos,
             )
             self._initialized = True
 
@@ -657,6 +705,25 @@ class AutowareRuntimeClient:
         with self._state_lock:
             self._raw_gps = message
             self._raw_gps_received_monotonic = time.monotonic()
+
+    def _on_fixposition_status(self, message: FpaOdomstatus) -> None:
+        with self._state_lock:
+            self._fixposition_status = message
+            self._fixposition_status_received_monotonic = time.monotonic()
+
+    def _on_fixposition_static_tf(self, message: TFMessage) -> None:
+        for transform in message.transforms:
+            if (
+                transform.header.frame_id.lstrip("/") == "FP_ECEF"
+                and transform.child_frame_id.lstrip("/") == "FP_ENU0"
+            ):
+                translation = transform.transform.translation
+                with self._state_lock:
+                    self._fixposition_enu0_ecef = (
+                        translation.x,
+                        translation.y,
+                        translation.z,
+                    )
 
     def _spin_locked(self, duration_s: float) -> None:
         assert self._node is not None
@@ -807,14 +874,68 @@ class AutowareRuntimeClient:
             "operation_mode": self._operation_mode_state_to_dict(operation_mode_state),
         }
 
-    def _raw_gps_to_geo_point(self, message: NavSatFix | None) -> GeoPoint | None:
-        if message is None:
+    @staticmethod
+    def _is_recent(received_monotonic: float | None) -> bool:
+        return (
+            received_monotonic is not None
+            and 0.0 <= time.monotonic() - received_monotonic < FIXPOSITION_DATA_TIMEOUT_S
+        )
+
+    def _fixposition_ready(
+        self, status: FpaOdomstatus | None, received_monotonic: float | None
+    ) -> bool:
+        return (
+            status is not None
+            and self._is_recent(received_monotonic)
+            and status.init_status == status.consts.INIT_STATUS_GLOBAL_INIT
+            and (
+                status.gnss1_status > status.consts.GNSS_STATUS_NO_FIX
+                or status.gnss2_status > status.consts.GNSS_STATUS_NO_FIX
+            )
+        )
+
+    def current_fp_enu0_origin(self) -> GeoPoint:
+        self._ensure_ready()
+        with self._client_lock:
+            self._spin_locked(0.2)
+
+        with self._state_lock:
+            status = self._fixposition_status
+            status_time = self._fixposition_status_received_monotonic
+            ecef = self._fixposition_enu0_ecef
+
+        if not self._fixposition_ready(status, status_time):
+            raise MapGenerationError(
+                "Fixposition must have recent global initialization and GNSS fix "
+                "before using its FP_ENU0 origin"
+            )
+        if ecef is None:
+            raise MapGenerationError(
+                "FP_ECEF -> FP_ENU0 transform is not available on "
+                f"{FIXPOSITION_STATIC_TF_TOPIC}"
+            )
+        return geo_point_from_ecef(ecef)
+
+    def _raw_gps_to_geo_point(
+        self, message: NavSatFix | None, received_monotonic: float | None
+    ) -> GeoPoint | None:
+        if (
+            message is None
+            or not self._is_recent(received_monotonic)
+            or message.status.status == message.status.STATUS_NO_FIX
+            or message.position_covariance_type == message.COVARIANCE_TYPE_UNKNOWN
+        ):
             return None
 
         latitude = finite_float_or_none(message.latitude)
         longitude = finite_float_or_none(message.longitude)
         altitude = finite_float_or_none(message.altitude)
-        if latitude is None or longitude is None:
+        if (
+            latitude is None
+            or longitude is None
+            or not -90.0 <= latitude <= 90.0
+            or not -180.0 <= longitude <= 180.0
+        ):
             return None
 
         return GeoPoint(
@@ -831,8 +952,9 @@ class AutowareRuntimeClient:
 
         with self._state_lock:
             raw_gps = self._raw_gps
+            raw_gps_received_monotonic = self._raw_gps_received_monotonic
 
-        return self._raw_gps_to_geo_point(raw_gps)
+        return self._raw_gps_to_geo_point(raw_gps, raw_gps_received_monotonic)
 
     def current_geo_local_anchor(self) -> GeoLocalAnchor | None:
         self._ensure_ready()
@@ -842,12 +964,22 @@ class AutowareRuntimeClient:
 
         with self._state_lock:
             kinematic_state = self._kinematic_state
+            kinematic_state_received_monotonic = self._kinematic_state_received_monotonic
             raw_gps = self._raw_gps
+            raw_gps_received_monotonic = self._raw_gps_received_monotonic
+            fixposition_status = self._fixposition_status
+            fixposition_status_received_monotonic = self._fixposition_status_received_monotonic
 
-        if kinematic_state is None:
+        if (
+            kinematic_state is None
+            or not self._is_recent(kinematic_state_received_monotonic)
+            or not self._fixposition_ready(
+                fixposition_status, fixposition_status_received_monotonic
+            )
+        ):
             return None
 
-        geo = self._raw_gps_to_geo_point(raw_gps)
+        geo = self._raw_gps_to_geo_point(raw_gps, raw_gps_received_monotonic)
         if geo is None:
             return None
 
@@ -879,8 +1011,15 @@ class AutowareRuntimeClient:
             received_monotonic = self._kinematic_state_received_monotonic
             raw_gps = self._raw_gps
             raw_gps_received_monotonic = self._raw_gps_received_monotonic
+            fixposition_status = self._fixposition_status
+            fixposition_status_received_monotonic = self._fixposition_status_received_monotonic
 
-        raw_geo_position = self._raw_gps_to_geo_point(raw_gps)
+        fixposition_ready = self._fixposition_ready(
+            fixposition_status, fixposition_status_received_monotonic
+        )
+        if not fixposition_ready or not self._is_recent(received_monotonic):
+            kinematic_state = None
+        raw_geo_position = self._raw_gps_to_geo_point(raw_gps, raw_gps_received_monotonic)
         raw_gps_age_ms = None
         if raw_gps_received_monotonic is not None:
             raw_gps_age_ms = max(0, int(round((time.monotonic() - raw_gps_received_monotonic) * 1000.0)))
@@ -890,7 +1029,7 @@ class AutowareRuntimeClient:
                 "status": "ok",
                 "received": raw_geo_position is not None,
                 "source_topic": (
-                    INS_RAW_GPS_TOPIC if raw_geo_position is not None else AUTOWARE_LOCALIZATION_KINEMATIC_STATE_TOPIC
+                    FIXPOSITION_LLH_TOPIC if raw_geo_position is not None else AUTOWARE_LOCALIZATION_KINEMATIC_STATE_TOPIC
                 ),
                 "age_ms": raw_gps_age_ms,
                 "error": (
@@ -936,14 +1075,15 @@ class AutowareRuntimeClient:
                 "raw_gps": {
                     "received": raw_geo_position is not None,
                     "age_ms": raw_gps_age_ms,
-                    "source_topic": INS_RAW_GPS_TOPIC,
+                    "source_topic": FIXPOSITION_LLH_TOPIC,
                     "latitude": None if raw_geo_position is None else finite_float_or_none(raw_geo_position.latitude),
                     "longitude": None if raw_geo_position is None else finite_float_or_none(raw_geo_position.longitude),
                     "altitude": None if raw_geo_position is None else finite_float_or_none(raw_geo_position.altitude),
                 },
                 "geo_available": raw_geo_position is not None,
-                "geo_error": None if raw_geo_position is not None else "INS 原始 GPS 尚未就绪",
-                "geo_source": "ins_raw_gps" if raw_geo_position is not None else None,
+                "geo_error": None if raw_geo_position is not None else "Fixposition GPS 尚未就绪",
+                "geo_source": "fixposition_llh" if raw_geo_position is not None else None,
+                "fixposition_ready": fixposition_ready,
             }
 
         position = kinematic_state.pose.pose.position
@@ -980,8 +1120,8 @@ class AutowareRuntimeClient:
             }
             runtime_map_error = str(exc)
 
-        geo_source = "ins_raw_gps" if raw_geo_position is not None else None
-        geo_error = None if raw_geo_position is not None else "INS 原始 GPS 尚未就绪"
+        geo_source = "fixposition_llh" if raw_geo_position is not None else None
+        geo_error = None if raw_geo_position is not None else "Fixposition GPS 尚未就绪"
         if geo_error is not None and runtime_map_error is not None:
             geo_error = f"{geo_error}；{runtime_map_error}"
 
@@ -1022,7 +1162,7 @@ class AutowareRuntimeClient:
             "raw_gps": {
                 "received": raw_geo_position is not None,
                 "age_ms": raw_gps_age_ms,
-                "source_topic": INS_RAW_GPS_TOPIC,
+                "source_topic": FIXPOSITION_LLH_TOPIC,
                 "latitude": None if raw_geo_position is None else finite_float_or_none(raw_geo_position.latitude),
                 "longitude": None if raw_geo_position is None else finite_float_or_none(raw_geo_position.longitude),
                 "altitude": None if raw_geo_position is None else finite_float_or_none(raw_geo_position.altitude),
@@ -1043,6 +1183,7 @@ class AutowareRuntimeClient:
             "geo_available": raw_geo_position is not None,
             "geo_error": geo_error,
             "geo_source": geo_source,
+            "fixposition_ready": fixposition_ready,
         }
 
     def set_route(
@@ -1073,7 +1214,7 @@ class AutowareRuntimeClient:
             request.header.frame_id = "map"
             request.header.stamp = self._node.get_clock().now().to_msg()
             request.goal = poses[-1]
-            request.waypoints = poses[:-1]
+            request.waypoints = poses[1:-1]
             request.option.allow_goal_modification = bool(allow_goal_modification)
 
             set_result = self._call_service_locked(
@@ -1088,7 +1229,7 @@ class AutowareRuntimeClient:
             "clear_existing": bool(clear_existing),
             "clear_route": clear_result,
             "set_route": set_result,
-            "waypoint_count": len(poses) - 1,
+            "waypoint_count": len(poses) - 2,
         }
 
     def clear_route(self) -> dict[str, Any]:
@@ -1334,6 +1475,30 @@ DEFAULT_VEHICLE_WIDTH_M = load_scout_vehicle_width_m()
 DEFAULT_LANE_WIDTH_M = DEFAULT_VEHICLE_WIDTH_M + DEFAULT_LANE_EXTRA_MARGIN_M
 
 
+def load_scout_min_turn_radius_m() -> float:
+    try:
+        vehicle_info = yaml.safe_load(SCOUT_VEHICLE_INFO_PATH.read_text(encoding="utf-8"))
+        parameters = vehicle_info["/**"]["ros__parameters"]
+        wheelbase = float(parameters["wheel_base"])
+        steering_limit = float(parameters["max_steer_angle"])
+        if not math.isfinite(wheelbase) or wheelbase <= 0.0:
+            raise ValueError("wheel_base must be finite and positive")
+        if not math.isfinite(steering_limit) or not 0.0 < steering_limit < math.pi / 2.0:
+            raise ValueError("max_steer_angle must be between 0 and pi/2")
+        # Match both the equivalent steering model and the Scout interface's yaw-rate limit.
+        return max(
+            wheelbase / math.tan(steering_limit),
+            (DEFAULT_SPEED_LIMIT_KPH / 3.6) / SCOUT_MAX_YAW_RATE_RADPS,
+        )
+    except Exception as exc:
+        raise MapGenerationError(
+            f"failed to read Scout turning limits from {SCOUT_VEHICLE_INFO_PATH}: {exc}"
+        ) from exc
+
+
+DEFAULT_MIN_TURN_RADIUS_M = load_scout_min_turn_radius_m()
+
+
 def load_payload(source: Path) -> dict[str, Any]:
     try:
         return json.loads(source.read_text(encoding="utf-8"))
@@ -1512,10 +1677,17 @@ def persist_configured_ins_origin(point: GeoPoint) -> dict[str, Any]:
     }
 
 
-def resolve_runtime_map_dir(payload: dict[str, Any]) -> Path:
+def resolve_runtime_map_dir(
+    payload: dict[str, Any], *, include_launch_map: bool = True
+) -> Path:
     raw_output_dir = payload.get("runtime_map_dir") or payload.get("output_dir")
     if raw_output_dir:
         return Path(str(raw_output_dir)).expanduser().resolve()
+
+    if include_launch_map:
+        launch_map_dir = os.environ.get("AUTOWARE_UI_RUNTIME_MAP_DIR", "").strip()
+        if launch_map_dir:
+            return Path(launch_map_dir).expanduser().resolve()
 
     map_name = sanitize_map_name(str(payload.get("map_name", DEFAULT_MAP_NAME)))
     return (DEFAULT_OUTPUT_ROOT / map_name).resolve()
@@ -1562,8 +1734,10 @@ def runtime_map_context_to_dict(context: RuntimeMapContext) -> dict[str, Any]:
     }
 
 
-def load_runtime_map_context(payload: dict[str, Any]) -> RuntimeMapContext:
-    output_dir = resolve_runtime_map_dir(payload)
+def load_runtime_map_context(
+    payload: dict[str, Any], *, include_launch_map: bool = True
+) -> RuntimeMapContext:
+    output_dir = resolve_runtime_map_dir(payload, include_launch_map=include_launch_map)
     projector_info_path = output_dir / "map_projector_info.yaml"
     if not projector_info_path.exists():
         raise MapGenerationError(f"runtime map projector info not found: {projector_info_path}")
@@ -1886,64 +2060,11 @@ def build_localization_initialize_pose(
     return build_route_pose(local_points[0], yaw), heading_source
 
 
-def sync_origin_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    command = str(payload.get("command", "")).strip()
-    source = "payload"
-    if command == "current_vehicle_gps":
-        current_point = AUTOWARE_RUNTIME_CLIENT.current_raw_gps_point()
-        if current_point is None:
-            return {
-                "status": "error",
-                "target": "ins_origin",
-                "target_label": "INS 参考原点",
-                "error": f"no valid raw GPS message received on {INS_RAW_GPS_TOPIC}",
-                "source": INS_RAW_GPS_TOPIC,
-            }
-        first_point = current_point
-        source = INS_RAW_GPS_TOPIC
-    else:
-        ins_path_points = parse_path_points(payload, float("nan"), min_points=1)
-        first_point = ins_path_points[0]
-
-    persist_result = persist_configured_ins_origin(first_point)
-    if persist_result.get("status") != "ok":
-        persist_result["target"] = "ins_origin"
-        persist_result["target_label"] = "INS 参考原点"
-        persist_result["source"] = source
-        return persist_result
-
-    if INS_ORIGIN_UPDATER.is_available(timeout_s=ORIGIN_SYNC_DISCOVERY_TIMEOUT_S):
-        result = INS_ORIGIN_UPDATER.update(first_point)
-        result["config_files"] = persist_result.get("config_files", [])
-        result["target"] = "ins_origin"
-        result["target_label"] = "INS 参考原点"
-        result["source"] = source
-        return result
-
-    return {
-        "status": "ok",
-        "message": (
-            "INS reference origin was persisted to startup config. "
-            "The current runtime could not be updated because the parameter service is unavailable."
-        ),
-        "target": "ins_origin",
-        "target_label": "INS 参考原点",
-        "source": source,
-        "node": INS_DRIVER_NODE_NAME,
-        "origin": {
-            "latitude": float(first_point.latitude),
-            "longitude": float(first_point.longitude),
-            "altitude": float(first_point.altitude),
-        },
-        "config_files": persist_result.get("config_files", []),
-        "runtime_update": {
-            "status": "skipped",
-            "error": (
-                f"INS driver parameter service is not available on "
-                f"{INS_DRIVER_NODE_NAME}/set_parameters_atomically"
-            ),
-        },
-    }
+def sync_origin_from_payload(_payload: dict[str, Any]) -> dict[str, Any]:
+    raise MapGenerationError(
+        "Fixposition FP_ENU0 cannot be changed by the EZ21 INS origin API; "
+        "configure and survey the sensor origin separately."
+    )
 
 
 def clamp(value: float, lower: float, upper: float) -> float:
@@ -2071,6 +2192,51 @@ def build_route_poses(path_points: list[GeoPoint], context: RuntimeMapContext) -
         build_route_pose(local_point, heading_yaw(local_points, index))
         for index, local_point in enumerate(local_points)
     ]
+
+
+def move_generated_map_endpoint_goal_inside_lane(
+    route_poses: list[Pose], context: RuntimeMapContext
+) -> float:
+    snapshot_path = context.output_dir / "map_generation_request.json"
+    if not snapshot_path.exists():
+        return 0.0
+
+    snapshot = load_payload(snapshot_path)
+    if snapshot.get("origin_source") != f"{FIXPOSITION_STATIC_TF_TOPIC}:FP_ECEF->FP_ENU0":
+        return 0.0
+    if parse_geo_point_mapping(snapshot.get("origin"), allow_missing=True) != context.origin:
+        return 0.0
+
+    map_points = parse_path_points(snapshot.get("payload", {}), context.elevation_m)
+    forward, _ = build_local_transformers(context.origin)
+    previous, endpoint = project_path(map_points[-2:], forward, context.elevation_m)
+    goal = route_poses[-1].position
+    dx, dy = endpoint.x - previous.x, endpoint.y - previous.y
+    length = math.hypot(dx, dy)
+    backoff_m = 1.0
+    if length < 2.0 * backoff_m:
+        raise MapGenerationError(
+            "generated lanelet is too short to place the goal inside its boundary"
+        )
+
+    unit_x, unit_y = dx / length, dy / length
+    from_endpoint_x = goal.x - endpoint.x
+    from_endpoint_y = goal.y - endpoint.y
+    distance_to_end_m = -(from_endpoint_x * unit_x + from_endpoint_y * unit_y)
+    lateral_error_m = abs(from_endpoint_x * unit_y - from_endpoint_y * unit_x)
+    if not (-0.1 <= distance_to_end_m < backoff_m and lateral_error_m <= 0.25):
+        return 0.0
+
+    adjustment_m = backoff_m - distance_to_end_m
+    route_poses[-1] = build_route_pose(
+        LocalPoint(
+            x=goal.x - adjustment_m * unit_x,
+            y=goal.y - adjustment_m * unit_y,
+            z=goal.z,
+        ),
+        math.atan2(dy, dx),
+    )
+    return adjustment_m
 
 
 def distance_xy(start: LocalPoint, end: LocalPoint) -> float:
@@ -2258,6 +2424,78 @@ def direction_vector(points: list[LocalPoint], index: int) -> tuple[float, float
         raise MapGenerationError("path points are too close to build a lane")
 
     return dx / length, dy / length
+
+
+def extend_centerline_start_for_vehicle(
+    centerline: list[LocalPoint], lane_width_m: float, vehicle: dict[str, Any]
+) -> tuple[list[LocalPoint], float, float]:
+    if (
+        not vehicle.get("received")
+        or vehicle.get("frame_id") != "map"
+        or vehicle.get("age_ms") is None
+        or vehicle["age_ms"] > 2000
+    ):
+        raise MapGenerationError("fresh vehicle localization in the map frame is required")
+
+    position = vehicle.get("pose", {}).get("position", {})
+    orientation = vehicle.get("pose", {}).get("orientation", {})
+    ego_x = finite_float_or_none(position.get("x"))
+    ego_y = finite_float_or_none(position.get("y"))
+    ego_yaw = finite_float_or_none(orientation.get("yaw"))
+    if ego_x is None or ego_y is None or ego_yaw is None:
+        raise MapGenerationError("vehicle position and heading are required to align the lane start")
+
+    if len(centerline) < 2:
+        raise MapGenerationError("at least two map centerline points are required")
+    along = 0.0
+    nearest = None
+    traveled = 0.0
+    for index, (start, end) in enumerate(zip(centerline, centerline[1:])):
+        dx, dy = end.x - start.x, end.y - start.y
+        length = math.hypot(dx, dy)
+        if length < 1e-6:
+            continue
+        raw_ratio = ((ego_x - start.x) * dx + (ego_y - start.y) * dy) / (length * length)
+        ratio = min(1.0, max(0.0, raw_ratio))
+        nearest_x = start.x + ratio * dx
+        nearest_y = start.y + ratio * dy
+        distance = math.hypot(ego_x - nearest_x, ego_y - nearest_y)
+        if index == 0 and raw_ratio < 0.0:
+            distance = abs((ego_x - start.x) * dy - (ego_y - start.y) * dx) / length
+        if nearest is None or distance < nearest[0]:
+            path_distance = traveled + ratio * length
+            if index == 0 and raw_ratio < 0.0:
+                path_distance = raw_ratio * length
+            nearest = (distance, path_distance, math.atan2(dy, dx))
+        traveled += length
+    if nearest is None:
+        raise MapGenerationError("map centerline points are too close to build a lane")
+    lateral_offset, along, heading = nearest
+    if along < -2.0:
+        raise MapGenerationError(
+            "the first map waypoint is more than 2 m ahead of the vehicle; "
+            "place it behind the vehicle before refreshing the map"
+        )
+
+    lateral_limit = lane_width_m / 2.0 - DEFAULT_VEHICLE_WIDTH_M / 2.0 - 0.1
+    heading_error = abs(math.atan2(math.sin(ego_yaw - heading), math.cos(ego_yaw - heading)))
+    if lateral_offset > lateral_limit or heading_error > math.radians(30.0):
+        raise MapGenerationError(
+            "vehicle is not aligned with the first map segment; "
+            "place the first waypoint behind the vehicle and align it with the driving direction"
+        )
+    extension_m = max(0.0, GENERATED_LANE_START_BACKWARD_MARGIN_M - along)
+    if not extension_m:
+        return centerline, 0.0, along
+    direction_x, direction_y = direction_vector(centerline, 0)
+    first = centerline[0]
+    extended = list(centerline)
+    extended[0] = LocalPoint(
+        x=first.x - direction_x * extension_m,
+        y=first.y - direction_y * extension_m,
+        z=first.z,
+    )
+    return extended, extension_m, along + extension_m
 
 
 def build_lane_boundaries(
@@ -2527,36 +2765,29 @@ def resolve_output_dir(payload: dict[str, Any], map_name: str, reload_autoware: 
     output_dir = payload.get("output_dir")
     if output_dir:
         return Path(output_dir).expanduser().resolve()
-    if reload_autoware:
-        return (DEFAULT_OUTPUT_ROOT / DEFAULT_MAP_NAME).resolve()
     return (DEFAULT_OUTPUT_ROOT / map_name).resolve()
 
 
-def resolve_generation_origin(
-    payload: dict[str, Any], path_points: list[GeoPoint], update_ins_origin: bool
-) -> tuple[GeoPoint, str]:
+def resolve_generation_origin(payload: dict[str, Any]) -> tuple[GeoPoint, str]:
     payload_origin = parse_geo_point_mapping(payload.get("origin"), allow_missing=True)
+    if parse_bool(payload, "use_live_fp_enu0_origin", default=False):
+        if payload_origin is not None:
+            raise MapGenerationError("choose either an explicit origin or the live FP_ENU0 origin")
+        return (
+            AUTOWARE_RUNTIME_CLIENT.current_fp_enu0_origin(),
+            f"{FIXPOSITION_STATIC_TF_TOPIC}:FP_ECEF->FP_ENU0",
+        )
     if payload_origin is not None:
         return payload_origin, "payload:origin"
 
-    if update_ins_origin:
-        return path_points[0], "payload_first_point:update_ins_origin"
-
-    ins_origin = INS_ORIGIN_RESOLVER.current_origin(timeout_s=ORIGIN_SYNC_DISCOVERY_TIMEOUT_S)
-    if ins_origin is not None:
-        return ins_origin, f"{INS_DRIVER_NODE_NAME}:active_reference_origin"
-
     try:
-        runtime_context = load_runtime_map_context(payload)
+        runtime_context = load_runtime_map_context(payload, include_launch_map=False)
         return runtime_context.origin, runtime_context.origin_source
-    except MapGenerationError:
-        pass
-
-    configured_origin = load_configured_ins_origin()
-    if configured_origin is not None:
-        return configured_origin, str(INS_DRIVER_CONFIG_PATH)
-
-    return path_points[0], "payload_first_point:fallback"
+    except MapGenerationError as exc:
+        raise MapGenerationError(
+            "Scout map generation requires a surveyed FP_ENU0 origin or an existing "
+            "map_projector_info.yaml aligned with FP_ENU0"
+        ) from exc
 
 
 def estimate_origin_from_anchor(anchor: GeoLocalAnchor, altitude_m: float) -> GeoPoint:
@@ -2584,41 +2815,6 @@ def project_path_from_anchor(
     ]
 
 
-def build_map_projector_message(projector_info_path: Path) -> dict[str, Any]:
-    try:
-        raw_info = yaml.safe_load(projector_info_path.read_text(encoding="utf-8")) or {}
-    except Exception as exc:
-        raise MapGenerationError(
-            f"failed to read map projector info from {projector_info_path}: {exc}"
-        ) from exc
-
-    projector_type = str(raw_info.get("projector_type", "")).strip()
-    if not projector_type:
-        raise MapGenerationError(f"{projector_info_path} is missing projector_type")
-
-    map_origin = raw_info.get("map_origin") or {}
-    message = {
-        "projector_type": projector_type,
-        "vertical_datum": str(raw_info.get("vertical_datum", "")),
-        "mgrs_grid": str(raw_info.get("mgrs_grid", "")),
-        "map_origin": {
-            "latitude": float(map_origin.get("latitude", 0.0)),
-            "longitude": float(map_origin.get("longitude", 0.0)),
-            "altitude": float(map_origin.get("altitude", 0.0)),
-        },
-        "scale_factor": float(raw_info.get("scale_factor", 1.0)),
-    }
-
-    if projector_type in {"Local", "LocalCartesian"}:
-        message["scale_factor"] = 1.0
-    elif projector_type in {"MGRS", "LocalCartesianUTM"}:
-        message["scale_factor"] = 0.9996
-    elif projector_type == "TransverseMercator" and "scale_factor" not in raw_info:
-        message["scale_factor"] = 0.9996
-
-    return message
-
-
 def anchor_to_dict(anchor: GeoLocalAnchor | None) -> dict[str, Any] | None:
     if anchor is None:
         return None
@@ -2636,6 +2832,37 @@ def anchor_to_dict(anchor: GeoLocalAnchor | None) -> dict[str, Any] | None:
             "z": anchor.local.z,
         },
     }
+
+
+def wait_for_lanelet_map_after(since_ns: int, timeout_s: float = 10.0) -> bool:
+    if not rclpy.ok():
+        return False
+
+    node = Node("ui_lanelet_reload_probe")
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+    received = False
+    qos = QoSProfile(
+        depth=1,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        reliability=ReliabilityPolicy.RELIABLE,
+    )
+
+    def on_map(message: LaneletMapBin) -> None:
+        nonlocal received
+        stamp_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
+        received = received or (bool(message.data) and stamp_ns >= since_ns)
+
+    node.create_subscription(LaneletMapBin, "/map/vector_map", on_map, qos)
+    try:
+        deadline = time.monotonic() + timeout_s
+        while not received and time.monotonic() < deadline:
+            executor.spin_once(timeout_sec=max(0.0, min(0.2, deadline - time.monotonic())))
+        return received
+    finally:
+        executor.remove_node(node)
+        executor.shutdown()
+        node.destroy_node()
 
 
 def reload_autoware_lanelet_map(output_dir: Path) -> dict[str, Any]:
@@ -2660,27 +2887,48 @@ def reload_autoware_lanelet_map(output_dir: Path) -> dict[str, Any]:
             "error": f"map projector info file not found: {projector_info_path}",
         }
 
-    message_json = json.dumps(build_map_projector_message(projector_info_path), ensure_ascii=False)
-    profile_path = Path.home() / ".profile"
-    shell_steps = []
-    if profile_path.exists():
-        shell_steps.append(
-            f"source {shlex.quote(str(profile_path))} >/dev/null 2>&1 || true"
-        )
-    shell_steps.append(f"source {shlex.quote(str(AUTOWARE_SETUP_BASH))}")
-    shell_steps.append(
-        "ros2 topic pub --once "
-        "--qos-durability transient_local "
-        "--qos-reliability reliable "
-        f"{shlex.quote(AUTOWARE_MAP_RELOAD_TOPIC)} "
-        "autoware_map_msgs/msg/MapProjectorInfo "
-        f"{shlex.quote(message_json)}"
+    shell_prefix = f"source {shlex.quote(str(AUTOWARE_SETUP_BASH))}"
+    capability_command = (
+        shell_prefix + " && ros2 param get "
+        + shlex.quote(AUTOWARE_MAP_PROJECTION_LOADER_NODE)
+        + " supports_runtime_reload"
     )
-    command = " ; ".join(shell_steps)
+    try:
+        capability = subprocess.run(
+            ["bash", "-c", capability_command],
+            capture_output=True,
+            text=True,
+            timeout=AUTOWARE_MAP_RELOAD_TIMEOUT_S,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return {"status": "error", "error": f"failed to check map projection loader: {exc}"}
+    if capability.returncode != 0 or not re.search(r"\btrue\b", capability.stdout, re.I):
+        return {
+            "status": "error",
+            "error": (
+                "running map projection loader does not support hot reload; "
+                "install the updated package and restart Autoware once"
+            ),
+        }
+
+    shell_steps = [shell_prefix]
+    shell_steps.append(
+        "ros2 param set "
+        f"{shlex.quote(AUTOWARE_LANELET_MAP_LOADER_NODE)} lanelet2_map_path "
+        f"{shlex.quote(str(lanelet2_map_path))}"
+    )
+    shell_steps.append(
+        "ros2 param set "
+        f"{shlex.quote(AUTOWARE_MAP_PROJECTION_LOADER_NODE)} map_projector_info_path "
+        f"{shlex.quote(str(projector_info_path))}"
+    )
+    command = " && ".join(shell_steps)
+    reload_started_ns = time.time_ns()
 
     try:
         result = subprocess.run(
-            ["bash", "-lc", command],
+            ["bash", "-c", command],
             capture_output=True,
             text=True,
             timeout=AUTOWARE_MAP_RELOAD_TIMEOUT_S,
@@ -2689,26 +2937,32 @@ def reload_autoware_lanelet_map(output_dir: Path) -> dict[str, Any]:
     except subprocess.TimeoutExpired:
         return {
             "status": "error",
-            "error": "timed out while publishing the Autoware map reload trigger",
+            "error": "timed out while reloading the Autoware map projector",
         }
     except Exception as exc:
         return {
             "status": "error",
-            "error": f"failed to publish the Autoware map reload trigger: {exc}",
+            "error": f"failed to reload the Autoware map projector: {exc}",
         }
 
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
         stdout = (result.stdout or "").strip()
-        error_message = stderr or stdout or "unknown ros2 topic pub failure"
+        error_message = stderr or stdout or "unknown map reload failure"
         return {
             "status": "error",
             "error": error_message,
         }
 
+    if not wait_for_lanelet_map_after(reload_started_ns):
+        return {
+            "status": "error",
+            "error": "lanelet map loader did not publish a fresh /map/vector_map after the reload",
+        }
+
     return {
         "status": "ok",
-        "message": "Autoware lanelet map reload was triggered",
+        "message": "Autoware lanelet map and map projector were reloaded",
         "topic": AUTOWARE_MAP_RELOAD_TOPIC,
         "lanelet2_map": str(lanelet2_map_path),
         "map_projector_info": str(projector_info_path),
@@ -2737,18 +2991,11 @@ def reload_autoware_pointcloud_map(output_dir: Path) -> dict[str, Any]:
             "error": f"pointcloud map metadata file not found: {pointcloud_map_metadata_path}",
         }
 
-    profile_path = Path.home() / ".profile"
-    shell_prefix = []
-    if profile_path.exists():
-        shell_prefix.append(
-            f"source {shlex.quote(str(profile_path))} >/dev/null 2>&1 || true"
-        )
-    shell_prefix.append(f"source {shlex.quote(str(AUTOWARE_SETUP_BASH))}")
-    prefix = " ; ".join(shell_prefix)
+    prefix = f"source {shlex.quote(str(AUTOWARE_SETUP_BASH))}"
 
     try:
         list_result = subprocess.run(
-            ["bash", "-lc", prefix + f" ; ros2 component list {shlex.quote(AUTOWARE_MAP_CONTAINER)}"],
+            ["bash", "-c", prefix + f" && ros2 component list {shlex.quote(AUTOWARE_MAP_CONTAINER)}"],
             capture_output=True,
             text=True,
             timeout=AUTOWARE_MAP_RELOAD_TIMEOUT_S,
@@ -2803,36 +3050,36 @@ def reload_autoware_pointcloud_map(output_dir: Path) -> dict[str, Any]:
         "pointcloud_map_loader",
         "--node-namespace",
         "/map",
-        "--param",
+        "--parameter",
         "enable_whole_load:=true",
-        "--param",
+        "--parameter",
         "enable_downsampled_whole_load:=false",
-        "--param",
+        "--parameter",
         "enable_partial_load:=true",
-        "--param",
+        "--parameter",
         "enable_selected_load:=false",
-        "--param",
+        "--parameter",
         shlex.quote(f"pcd_paths_or_directory:=[{pointcloud_map_path}]"),
-        "--param",
+        "--parameter",
         shlex.quote(f"pcd_metadata_path:={pointcloud_map_metadata_path}"),
-        "--remap",
+        "--remap-rule",
         "output/pointcloud_map:=/map/pointcloud_map",
-        "--remap",
+        "--remap-rule",
         "output/pointcloud_map_metadata:=/map/pointcloud_map_metadata",
-        "--remap",
+        "--remap-rule",
         "service/get_partial_pcd_map:=/map/get_partial_pointcloud_map",
-        "--remap",
+        "--remap-rule",
         "service/get_differential_pcd_map:=/map/get_differential_pointcloud_map",
-        "--remap",
+        "--remap-rule",
         "service/get_selected_pcd_map:=/map/get_selected_pointcloud_map",
     ]
     reload_steps.append(" ".join(load_arguments))
 
-    reload_command = prefix + " ; " + " ; ".join(reload_steps)
+    reload_command = prefix + " && " + " && ".join(reload_steps)
 
     try:
         reload_result = subprocess.run(
-            ["bash", "-lc", reload_command],
+            ["bash", "-c", reload_command],
             capture_output=True,
             text=True,
             timeout=AUTOWARE_MAP_COMPONENT_RELOAD_TIMEOUT_S,
@@ -2863,12 +3110,12 @@ def reload_autoware_pointcloud_map(output_dir: Path) -> dict[str, Any]:
 
     verify_command = (
         prefix
-        + " ; ros2 topic info -v "
+        + " && ros2 topic info -v "
         + shlex.quote(AUTOWARE_POINTCLOUD_MAP_TOPIC)
     )
     try:
         verify_result = subprocess.run(
-            ["bash", "-lc", verify_command],
+            ["bash", "-c", verify_command],
             capture_output=True,
             text=True,
             timeout=AUTOWARE_MAP_RELOAD_TIMEOUT_S,
@@ -2905,12 +3152,166 @@ def reload_autoware_pointcloud_map(output_dir: Path) -> dict[str, Any]:
     }
 
 
+def require_live_fp_enu0_alignment(origin: GeoPoint, *, map_label: str) -> None:
+    live_origin = AUTOWARE_RUNTIME_CLIENT.current_fp_enu0_origin()
+    forward, _ = build_local_transformers(live_origin)
+    offset = project_path([origin], forward, origin.altitude)[0]
+    if math.hypot(offset.x, offset.y) > 0.05 or abs(origin.altitude - live_origin.altitude) > 0.1:
+        raise MapGenerationError(
+            f"{map_label} origin differs from the current Fixposition FP_ENU0; "
+            "load a map aligned with the live localization frame before routing or driving"
+        )
+
+
+def prepare_runtime_map_switch(new_origin: GeoPoint) -> None:
+    active_map_dir = os.environ.get("AUTOWARE_UI_RUNTIME_MAP_DIR", "").strip()
+    if not active_map_dir:
+        raise MapGenerationError("hot map switch requires Scout UI to be started with the Autoware map_path")
+
+    load_runtime_map_context({})
+    require_live_fp_enu0_alignment(new_origin, map_label="new map")
+
+    snapshot = AUTOWARE_RUNTIME_CLIENT.snapshot()
+    mode = snapshot["operation_mode"]
+    if not mode["received"] or mode["label"] != "STOP" or mode["is_autoware_control_enabled"] or mode["is_in_transition"]:
+        raise MapGenerationError("stop the vehicle and disable Autoware control before changing maps")
+
+    vehicle = AUTOWARE_RUNTIME_CLIENT.vehicle_state_snapshot()
+    if not vehicle.get("received") or (vehicle.get("age_ms") or 0) > 2000:
+        raise MapGenerationError("fresh vehicle localization is required before changing maps")
+    linear = vehicle["twist"]["linear"]
+    if math.sqrt(sum(float(linear[axis]) ** 2 for axis in ("x", "y", "z"))) > 0.05:
+        raise MapGenerationError("the vehicle must be stationary before changing maps")
+
+    route_state = snapshot["route_state"]
+    if not route_state["received"]:
+        raise MapGenerationError("route state is unavailable; cannot safely change maps")
+    if route_state["label"] != "UNSET":
+        result = AUTOWARE_RUNTIME_CLIENT.clear_route()
+        if result["status"] != "ok":
+            raise MapGenerationError(f"failed to clear the old route: {result['clear_route']}")
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            if AUTOWARE_RUNTIME_CLIENT.snapshot()["route_state"]["label"] == "UNSET":
+                break
+        else:
+            raise MapGenerationError("old route did not reach UNSET; map was not switched")
+
+
+def switch_autoware_map(output_dir: Path) -> dict[str, Any]:
+    context = load_runtime_map_context({"runtime_map_dir": str(output_dir)})
+    for filename in ("lanelet2_map.osm", "pointcloud_map.pcd", "pointcloud_map_metadata.yaml"):
+        if not (output_dir / filename).is_file():
+            raise MapGenerationError(f"map file not found: {output_dir / filename}")
+    prepare_runtime_map_switch(context.origin)
+
+    global MAP_SWITCH_FAILED
+    MAP_SWITCH_FAILED = True
+    lanelet_result = reload_autoware_lanelet_map(output_dir)
+    if lanelet_result.get("status") != "ok":
+        return lanelet_result
+
+    pointcloud_result = reload_autoware_pointcloud_map(output_dir)
+    if pointcloud_result.get("status") != "ok":
+        return {
+            "status": "error",
+            "error": (
+                "lanelet map reload succeeded, but pointcloud map reload failed: "
+                + str(pointcloud_result.get("error", "unknown error"))
+            ),
+            "lanelet_reload": lanelet_result,
+            "pointcloud_reload": pointcloud_result,
+        }
+
+    os.environ["AUTOWARE_UI_RUNTIME_MAP_DIR"] = str(output_dir)
+    MAP_SWITCH_FAILED = False
+    return {
+        "status": "ok",
+        "message": "Autoware lanelet, projector and pointcloud maps were reloaded",
+        "lanelet_reload": lanelet_result,
+        "pointcloud_reload": pointcloud_result,
+    }
+
+
+def generated_map_dir(map_name: Any) -> Path:
+    if not isinstance(map_name, str) or not map_name or map_name != sanitize_map_name(map_name):
+        raise MapGenerationError("select a valid generated map name")
+    root = DEFAULT_OUTPUT_ROOT.resolve()
+    output_dir = (root / map_name).resolve()
+    if output_dir.parent != root or not output_dir.is_dir():
+        raise MapGenerationError(f"generated map not found: {map_name}")
+    return output_dir
+
+
+def list_generated_maps() -> dict[str, Any]:
+    if not DEFAULT_OUTPUT_ROOT.is_dir():
+        return {"status": "ok", "maps": []}
+    active_map_dir = os.environ.get("AUTOWARE_UI_RUNTIME_MAP_DIR", "").strip()
+    active_path = Path(active_map_dir).resolve() if active_map_dir else None
+    try:
+        live_origin = AUTOWARE_RUNTIME_CLIENT.current_fp_enu0_origin()
+    except MapGenerationError:
+        live_origin = None
+
+    maps = []
+    for output_dir in DEFAULT_OUTPUT_ROOT.iterdir():
+        if not output_dir.is_dir() or output_dir.is_symlink():
+            continue
+        try:
+            context = load_runtime_map_context({"runtime_map_dir": str(output_dir)})
+            for filename in ("lanelet2_map.osm", "pointcloud_map.pcd", "pointcloud_map_metadata.yaml"):
+                if not (output_dir / filename).is_file():
+                    raise MapGenerationError("incomplete map")
+        except (MapGenerationError, OSError, ValueError):
+            continue
+        compatible = False
+        if live_origin is not None:
+            forward, _ = build_local_transformers(live_origin)
+            offset = project_path([context.origin], forward, context.origin.altitude)[0]
+            compatible = (
+                math.hypot(offset.x, offset.y) <= 0.05
+                and abs(context.origin.altitude - live_origin.altitude) <= 0.1
+            )
+        maps.append({
+            "map_name": output_dir.name,
+            "output_dir": str(output_dir),
+            "active": output_dir.resolve() == active_path,
+            "compatible_with_fp_enu0": compatible,
+            "modified_at": output_dir.stat().st_mtime,
+        })
+    maps.sort(key=lambda item: item["modified_at"], reverse=True)
+    return {"status": "ok", "maps": maps}
+
+
+def activate_generated_map_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    output_dir = generated_map_dir(payload.get("map_name"))
+    active_map_dir = os.environ.get("AUTOWARE_UI_RUNTIME_MAP_DIR", "").strip()
+    if active_map_dir and output_dir == Path(active_map_dir).resolve():
+        context = load_runtime_map_context({"runtime_map_dir": str(output_dir)})
+        require_live_fp_enu0_alignment(context.origin, map_label="active map")
+        return {
+            "status": "ok",
+            "map_name": output_dir.name,
+            "output_dir": str(output_dir),
+            "autoware_reload": {"status": "ok", "message": "map is already active"},
+        }
+    reload_result = switch_autoware_map(output_dir)
+    return {
+        "status": reload_result["status"],
+        "map_name": output_dir.name,
+        "output_dir": str(output_dir),
+        "autoware_reload": reload_result,
+    }
+
+
 def generate_map_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     requested_map_name = sanitize_map_name(str(payload.get("map_name", DEFAULT_MAP_NAME)))
     reload_autoware = parse_bool(payload, "reload_autoware", default=False)
     publish_overlay = parse_bool(payload, "publish_satellite_overlay", default=False)
     update_ins_origin = parse_bool(payload, "update_ins_origin", default=False)
-    map_name = DEFAULT_MAP_NAME if reload_autoware else requested_map_name
+    if update_ins_origin:
+        raise MapGenerationError("Fixposition FP_ENU0 cannot be changed by the UI")
+    map_name = requested_map_name
     elevation_m = parse_float(payload, "elevation_m", "elevation", default=DEFAULT_ELEVATION_M)
     lane_width_m = parse_float(payload, "lane_width_m", "lane_width", default=DEFAULT_LANE_WIDTH_M)
     speed_limit_kph = parse_float(
@@ -2939,28 +3340,28 @@ def generate_map_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
     input_centerline_geo = parse_path_points(payload, elevation_m)
-    base_origin, origin_source = resolve_generation_origin(
-        payload, input_centerline_geo, update_ins_origin
-    )
+    map_origin, origin_source = resolve_generation_origin(payload)
     generation_anchor = None
-    if not update_ins_origin and origin_source != "payload:origin":
-        generation_anchor = AUTOWARE_RUNTIME_CLIENT.current_geo_local_anchor()
-
-    if generation_anchor is not None:
-        map_origin = estimate_origin_from_anchor(generation_anchor, base_origin.altitude)
-        origin_source = generation_anchor.source
-        raw_centerline_local = project_path_from_anchor(
-            input_centerline_geo, generation_anchor, elevation_m
-        )
-    else:
-        map_origin = base_origin
-        forward, _ = build_local_transformers(map_origin)
-        raw_centerline_local = project_path(input_centerline_geo, forward, elevation_m)
+    forward, _ = build_local_transformers(map_origin)
+    raw_centerline_local = project_path(input_centerline_geo, forward, elevation_m)
 
     _, inverse = build_local_transformers(map_origin)
     centerline_local = smooth_centerline_with_turn_radius(
         raw_centerline_local, min_turn_radius_m, DEFAULT_TURN_ARC_STEP_M
     )
+    start_extension_m = 0.0
+    lane_start_margin_m = None
+    if reload_autoware and os.environ.get("AUTOWARE_UI_RUNTIME_MAP_DIR", "").strip():
+        live_origin = AUTOWARE_RUNTIME_CLIENT.current_fp_enu0_origin()
+        live_forward, _ = build_local_transformers(live_origin)
+        origin_offset = project_path([map_origin], live_forward, map_origin.altitude)[0]
+        if (
+            math.hypot(origin_offset.x, origin_offset.y) <= 0.05
+            and abs(map_origin.altitude - live_origin.altitude) <= 0.1
+        ):
+            centerline_local, start_extension_m, lane_start_margin_m = extend_centerline_start_for_vehicle(
+                centerline_local, lane_width_m, AUTOWARE_RUNTIME_CLIENT.vehicle_state_snapshot()
+            )
     centerline_geo = convert_local_points_to_geo(centerline_local, inverse)
     left_boundary_local, right_boundary_local = build_lane_boundaries(centerline_local, lane_width_m)
     pointcloud_points = build_flat_pcd_points(
@@ -2972,6 +3373,9 @@ def generate_map_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
     output_dir = resolve_output_dir(payload, map_name, reload_autoware)
+    active_map_dir = os.environ.get("AUTOWARE_UI_RUNTIME_MAP_DIR", "").strip()
+    if active_map_dir and output_dir == Path(active_map_dir).expanduser().resolve():
+        raise MapGenerationError("cannot overwrite the map currently loaded by Autoware")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     osm_path = output_dir / "lanelet2_map.osm"
@@ -3018,6 +3422,8 @@ def generate_map_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "reload_autoware": reload_autoware,
         "input_point_count": len(input_centerline_geo),
         "centerline_point_count": len(centerline_local),
+        "start_extension_m": start_extension_m,
+        "lane_start_margin_m": lane_start_margin_m,
         "vehicle_width_m": DEFAULT_VEHICLE_WIDTH_M,
         "lane_width_m": lane_width_m,
         "lane_extra_margin_m": DEFAULT_LANE_EXTRA_MARGIN_M,
@@ -3042,28 +3448,7 @@ def generate_map_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
     if reload_autoware:
-        lanelet_reload_result = reload_autoware_lanelet_map(output_dir)
-        if lanelet_reload_result.get("status") == "ok":
-            pointcloud_reload_result = reload_autoware_pointcloud_map(output_dir)
-            if pointcloud_reload_result.get("status") == "ok":
-                reload_result = {
-                    "status": "ok",
-                    "message": "Autoware lanelet and pointcloud maps were reloaded",
-                    "lanelet_reload": lanelet_reload_result,
-                    "pointcloud_reload": pointcloud_reload_result,
-                }
-            else:
-                reload_result = {
-                    "status": "error",
-                    "error": (
-                        "lanelet map reload succeeded, but pointcloud map reload failed: "
-                        + str(pointcloud_reload_result.get("error", "unknown error"))
-                    ),
-                    "lanelet_reload": lanelet_reload_result,
-                    "pointcloud_reload": pointcloud_reload_result,
-                }
-        else:
-            reload_result = lanelet_reload_result
+        reload_result = switch_autoware_map(output_dir)
     else:
         reload_result = {
             "status": "skipped",
@@ -3080,18 +3465,13 @@ def generate_map_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "message": "publish_satellite_overlay is false, so RViz background was not updated",
         }
 
-    if update_ins_origin:
-        ins_origin_result = sync_origin_from_payload(payload)
-    else:
-        ins_origin_result = {
-            "status": "skipped",
-            "message": (
-                "update_ins_origin is false, so the reference origin / initial pose was not updated"
-            ),
-        }
+    ins_origin_result = {
+        "status": "skipped",
+        "message": "Fixposition FP_ENU0 is not modified by the UI",
+    }
 
     return {
-        "status": "ok",
+        "status": "error" if reload_autoware and reload_result["status"] != "ok" else "ok",
         "map_name": map_name,
         "requested_map_name": requested_map_name,
         "output_dir": str(output_dir),
@@ -3125,6 +3505,8 @@ def generate_map_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 def get_autoware_status() -> dict[str, Any]:
     result = AUTOWARE_RUNTIME_CLIENT.snapshot()
+    result["ui_actions_enabled"] = SCOUT_UI_ALLOW_VEHICLE_ACTIONS
+    result["map_switch_failed"] = MAP_SWITCH_FAILED
     try:
         context = load_runtime_map_context({})
         result["runtime_map"] = runtime_map_context_to_dict(context)
@@ -3141,13 +3523,20 @@ def get_vehicle_state() -> dict[str, Any]:
 
 
 def set_route_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if MAP_SWITCH_FAILED:
+        raise MapGenerationError("map switch failed; route commands are blocked until a successful reload or restart")
     context = load_runtime_map_context(payload)
+    active_map_dir = os.environ.get("AUTOWARE_UI_RUNTIME_MAP_DIR", "").strip()
+    if active_map_dir and context.output_dir != Path(active_map_dir).expanduser().resolve():
+        raise MapGenerationError("route map does not match the map currently loaded by Autoware")
+    require_live_fp_enu0_alignment(context.origin, map_label="active map")
     path_points = parse_path_points(payload, context.elevation_m, min_points=2)
     allow_goal_modification = parse_bool(
         payload, "allow_goal_modification", default=False
     )
     clear_existing = parse_bool(payload, "clear_existing", default=True)
     route_poses = build_route_poses(path_points, context)
+    goal_adjustment_m = move_generated_map_endpoint_goal_inside_lane(route_poses, context)
     result = AUTOWARE_RUNTIME_CLIENT.set_route(
         route_poses,
         allow_goal_modification=allow_goal_modification,
@@ -3156,6 +3545,8 @@ def set_route_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     result["runtime_map"] = runtime_map_context_to_dict(context)
     result["input_point_count"] = len(path_points)
     result["allow_goal_modification"] = bool(allow_goal_modification)
+    result["goal_adjustment_m"] = goal_adjustment_m
+    result["route_start_source"] = "current_vehicle_pose"
     return result
 
 
@@ -3269,7 +3660,7 @@ class MapRequestHandler(SimpleHTTPRequestHandler):
                     {
                         "status": "ok",
                         "message": (
-                            "POST /generate_map, /publish_satellite_overlay, /update_ins_origin, "
+                            "POST /generate_map, /activate_map, /publish_satellite_overlay, /update_ins_origin, "
                             "/set_route, /clear_route, /change_to_autonomous, /change_to_stop, "
                             "/enable_autoware_control, /disable_autoware_control, /reset_autoware, or GET /vehicle_state"
                         ),
@@ -3279,6 +3670,9 @@ class MapRequestHandler(SimpleHTTPRequestHandler):
                 return
             if request_path == "/autoware_status":
                 self._send_json(200, get_autoware_status())
+                return
+            if request_path == "/generated_maps":
+                self._send_json(200, list_generated_maps())
                 return
             if request_path == "/vehicle_state":
                 self._send_json(200, get_vehicle_state())
@@ -3301,6 +3695,7 @@ class MapRequestHandler(SimpleHTTPRequestHandler):
                 return
             if request_path not in {
                 "/generate_map",
+                "/activate_map",
                 "/publish_satellite_overlay",
                 "/update_ins_origin",
                 "/set_route",
@@ -3313,6 +3708,18 @@ class MapRequestHandler(SimpleHTTPRequestHandler):
             }:
                 self._send_json(404, {"status": "error", "error": "unknown endpoint"})
                 return
+            if not SCOUT_UI_ALLOW_VEHICLE_ACTIONS and request_path in {
+                "/generate_map",
+                "/activate_map",
+                "/set_route",
+                "/change_to_autonomous",
+                "/enable_autoware_control",
+            }:
+                self._send_json(
+                    403,
+                    {"status": "error", "error": "Scout UI vehicle actions are disabled"},
+                )
+                return
             content_length = int(self.headers.get("Content-Length", "0"))
             raw_body = self.rfile.read(content_length)
             payload = (
@@ -3321,21 +3728,38 @@ class MapRequestHandler(SimpleHTTPRequestHandler):
                 else {}
             )
             if request_path == "/generate_map":
-                result = generate_map_from_payload(payload)
+                with MAP_SWITCH_LOCK:
+                    result = generate_map_from_payload(payload)
+            elif request_path == "/activate_map":
+                with MAP_SWITCH_LOCK:
+                    result = activate_generated_map_from_payload(payload)
             elif request_path == "/update_ins_origin":
                 result = sync_origin_from_payload(payload)
             elif request_path == "/publish_satellite_overlay":
                 result = publish_satellite_overlay_from_payload(payload)
             elif request_path == "/set_route":
-                result = set_route_from_payload(payload)
+                with MAP_SWITCH_LOCK:
+                    result = set_route_from_payload(payload)
             elif request_path == "/clear_route":
                 result = clear_route_from_payload(payload)
             elif request_path == "/change_to_autonomous":
-                result = change_to_autonomous_from_payload(payload)
+                with MAP_SWITCH_LOCK:
+                    if MAP_SWITCH_FAILED:
+                        raise MapGenerationError("map switch failed; autonomous mode is blocked")
+                    require_live_fp_enu0_alignment(
+                        load_runtime_map_context({}).origin, map_label="active map"
+                    )
+                    result = change_to_autonomous_from_payload(payload)
             elif request_path == "/change_to_stop":
                 result = change_to_stop_from_payload(payload)
             elif request_path == "/enable_autoware_control":
-                result = enable_autoware_control_from_payload(payload)
+                with MAP_SWITCH_LOCK:
+                    if MAP_SWITCH_FAILED:
+                        raise MapGenerationError("map switch failed; Autoware control is blocked")
+                    require_live_fp_enu0_alignment(
+                        load_runtime_map_context({}).origin, map_label="active map"
+                    )
+                    result = enable_autoware_control_from_payload(payload)
             elif request_path == "/disable_autoware_control":
                 result = disable_autoware_control_from_payload(payload)
             else:

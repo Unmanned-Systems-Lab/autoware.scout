@@ -271,6 +271,13 @@ bool ScenarioSelectorNode::isEmptyParkingTrajectory() const
 
 void ScenarioSelectorNode::onMap(const autoware_map_msgs::msg::LaneletMapBin::ConstSharedPtr msg)
 {
+  if (route_handler_) {
+    route_.reset();
+    lane_driving_trajectory_.reset();
+    parking_trajectory_.reset();
+    current_scenario_ = autoware_internal_planning_msgs::msg::Scenario::EMPTY;
+    RCLCPP_WARN(get_logger(), "Map changed; waiting for a new route before selecting a scenario");
+  }
   route_handler_ = std::make_shared<autoware::route_handler::RouteHandler>(*msg);
 }
 
