@@ -1,0 +1,43 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Map
+      Name: HT Fused Costmap (4 cm)
+      Enabled: true
+      Alpha: 1.0
+      Color Scheme: map
+      Topic:
+        Value: /scout/traversability/fused_costmap
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        Depth: 1
+    - Class: rviz_default_plugins/Axes
+      Name: Vehicle Position
+      Enabled: true
+      Reference Frame: base_link
+      Length: 1
+      Radius: 0.05
+  Enabled: true
+  Global Options:
+    Fixed Frame: map
+    Background Color: 48; 48; 48
+    Frame Rate: 10
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Target Frame: base_link
+      Scale: 45
+      X: 0
+      Y: 0
+Window Geometry:
+  X: 995
+  Y: 30
+  Width: 925
+  Height: 490

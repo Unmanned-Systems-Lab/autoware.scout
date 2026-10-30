@@ -1,0 +1,1608 @@
+diff --git a/src/ht_traversability_ros2/ht_traversability_ros2/core.py b/src/ht_traversability_ros2/ht_traversability_ros2/core.py
+index bb5aa07..6c9effe 100644
+--- a/src/ht_traversability_ros2/ht_traversability_ros2/core.py
++++ b/src/ht_traversability_ros2/ht_traversability_ros2/core.py
+@@ -41,6 +41,36 @@ def nearest_fill_nan(height: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+     return np.ascontiguousarray(filled, dtype=np.float32), finite
+ 
+ 
++def prepare_observation_height(height, observation_count):
++    """Keep prior cells distinct from measurements when preparing HT context."""
++    height = np.asarray(height, dtype=np.float32)
++    count = np.asarray(observation_count, dtype=np.float32)
++    if (height.ndim != 2 or count.shape != height.shape
++            or not np.isfinite(count).all() or (count < 0).any()):
++        raise ValueError("Invalid observation_count layer")
++    observed = count > 0
++    if not np.isfinite(height[observed]).all():
++        raise ValueError("Observed elevation must be finite")
++    if observed.any():
++        filled, _ = nearest_fill_nan(np.where(observed, height, np.nan))
++    else:
++        filled = np.where(np.isfinite(height), height, 0.0).astype(np.float32)
++    return filled, observed
++
++
++def add_unobserved_prior_layers(layers, observed):
++    """Label optimistic priors without fabricating model probabilities."""
++    observed = np.asarray(observed, dtype=bool)
++    layers["ht_observed"] = observed.astype(np.float32)
++    layers["ht_prior_free"] = (~observed).astype(np.float32)
++    for k in range(8):
++        name = f"ht_cost_dir_{k}"
++        if name in layers:
++            layers[name][~observed] = 0.0
++    if "ht_traversable" in layers:
++        layers["ht_traversable"][~observed] = 1.0
++
++
+ def valid_window_ratio(valid_mask: np.ndarray, window: int = RECEPTIVE_FIELD) -> np.ndarray:
+     """Fraction of observed input cells in every valid convolution window."""
+ 
+diff --git a/src/ht_traversability_ros2/ht_traversability_ros2/node.py b/src/ht_traversability_ros2/ht_traversability_ros2/node.py
+index f89c588..40f510f 100644
+--- a/src/ht_traversability_ros2/ht_traversability_ros2/node.py
++++ b/src/ht_traversability_ros2/ht_traversability_ros2/node.py
+@@ -22,6 +22,8 @@ from .core import (
+     build_output_layers,
+     embed_center,
+     nearest_fill_nan,
++    prepare_observation_height,
++    add_unobserved_prior_layers,
+     bounded_median_height,
+     valid_window_ratio,
+     validate_direction_order,
+@@ -36,6 +38,7 @@ class HTTraversabilityNode(Node):
+ 
+         self.declare_parameter("input_topic", "/elevation_mapping_node/elevation_map_filter")
+         self.declare_parameter("input_layer", "inpaint")
++        self.declare_parameter("unobserved_is_free", False)
+         self.declare_parameter("height_median_kernel", 1)
+         self.declare_parameter("height_median_max_delta", .04)
+         self.declare_parameter("height_median_max_relief", .12)
+@@ -247,7 +250,16 @@ class HTTraversabilityNode(Node):
+                     f"{RECEPTIVE_FIELD}x{RECEPTIVE_FIELD} receptive field"
+                 )
+ 
+-            filled, finite_mask = nearest_fill_nan(height)
++            observed = None
++            if self.get_parameter("unobserved_is_free").value:
++                if "observation_count" not in message.layers:
++                    raise ValueError("Optimistic prior requires observation_count")
++                count = decode_layer("observation_count", message.data[
++                    list(message.layers).index("observation_count")])
++                filled, finite_mask = prepare_observation_height(height, count)
++                observed = finite_mask
++            else:
++                filled, finite_mask = nearest_fill_nan(height)
+             filled = bounded_median_height(filled, finite_mask,
+                 int(self.get_parameter("height_median_kernel").value),
+                 float(self.get_parameter("height_median_max_delta").value),
+@@ -302,6 +314,8 @@ class HTTraversabilityNode(Node):
+                 )
+             if self.publish_height_layer:
+                 layers["ht_height"] = height.astype(np.float32, copy=False)
++            if observed is not None:
++                add_unobserved_prior_layers(layers, observed)
+             if not layers:
+                 raise RuntimeError("HT output has no enabled layers")
+             self.publisher.publish(self._make_output_message(message, layers))
+diff --git a/src/ht_traversability_ros2/test/test_core.py b/src/ht_traversability_ros2/test/test_core.py
+index 8668cd4..b6d0ce3 100644
+--- a/src/ht_traversability_ros2/test/test_core.py
++++ b/src/ht_traversability_ros2/test/test_core.py
+@@ -7,11 +7,50 @@ from ht_traversability_ros2.core import (
+     build_output_layers,
+     embed_center,
+     nearest_fill_nan,
++    prepare_observation_height,
++    add_unobserved_prior_layers,
+     valid_window_ratio,
+     validate_direction_order,
+ )
+ 
+ 
++def test_initial_prior_has_free_costs_without_fabricated_model_scores():
++    height = np.zeros((55, 55), np.float32)
++    filled, observed = prepare_observation_height(height, np.zeros_like(height))
++    assert not observed.any()
++    assert (filled == 0).all()
++    layers = {"ht_dir_0": np.full_like(height, np.nan),
++              "ht_cost_dir_0": np.full_like(height, np.nan)}
++    add_unobserved_prior_layers(layers, observed)
++    assert np.isnan(layers["ht_dir_0"]).all()
++    assert (layers["ht_cost_dir_0"] == 0).all()
++    assert (layers["ht_prior_free"] == 1).all()
++    assert (layers["ht_observed"] == 0).all()
++
++
++def test_unobserved_minus_one_height_is_preserved_for_empty_model_context():
++    height = np.full((55, 55), -1., np.float32)
++    filled, observed = prepare_observation_height(height, np.zeros_like(height))
++    assert (filled == -1).all()
++    assert not observed.any()
++
++
++def test_prior_zero_is_not_used_as_a_real_height_in_model_context():
++    height = np.zeros((55, 55), np.float32)
++    count = np.zeros_like(height)
++    height[20, 20], count[20, 20] = 2., 1.
++    filled, observed = prepare_observation_height(height, count)
++    assert (filled == 2).all()
++    assert observed.sum() == 1
++    layers = {"ht_cost_dir_0": np.ones_like(height)}
++    add_unobserved_prior_layers(layers, observed)
++    assert layers["ht_cost_dir_0"][20, 20] == 1
++    assert (layers["ht_cost_dir_0"][~observed] == 0).all()
++    count[0, 0] = np.nan
++    with pytest.raises(ValueError, match="observation_count"):
++        prepare_observation_height(height, count)
++
++
+ def test_valid_window_ratio_shape_and_value():
+     mask = np.ones((250, 250), dtype=bool)
+     result = valid_window_ratio(mask, 51)
+diff --git a/src/vendor/elevation/elevation_mapping_cupy/config/core/core_param.yaml b/src/vendor/elevation/elevation_mapping_cupy/config/core/core_param.yaml
+index fe3fd63..beb6ad7 100644
+--- a/src/vendor/elevation/elevation_mapping_cupy/config/core/core_param.yaml
++++ b/src/vendor/elevation/elevation_mapping_cupy/config/core/core_param.yaml
+@@ -15,6 +15,9 @@
+     global_map_max_tiles_in_memory: 256
+     global_map_storage_path: '~/.ros/elevation_mapping_cupy/global_tiles.sqlite3'
+     global_map_resume_from_disk: false
++    global_map_initial_elevation: 0.0             # Prior mean [m], not an observed flat surface.
++    global_map_initial_variance: 10000.0          # Prior P0 [m^2], independent of observation variance cap.
++    global_map_publish_unobserved_prior: false
+     # GridMap is necessarily finite: this is only a high-resolution ROI view.
+     # The MarkerArray tile topic above visualizes all allocated global tiles.
+     global_map_view_length_x: 30.0
+diff --git a/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/elevation_mapping.py b/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/elevation_mapping.py
+index 0e8f647..ac6ff8d 100644
+--- a/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/elevation_mapping.py
++++ b/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/elevation_mapping.py
+@@ -89,6 +89,9 @@ class ElevationSnapshotBuffer:
+     variance_pinned_memory: Any
+     updated_pinned_memory: Any
+     center_pinned_memory: Any
++    clearance_gpu: Any
++    clearance_cpu: np.ndarray
++    clearance_pinned_memory: Any
+     stamp: Any = None
+     generation: int = 0
+ 
+@@ -139,6 +142,11 @@ class ElevationMap:
+         self.global_update_mask = xp.zeros(
+             (self.cell_n, self.cell_n), dtype=xp.bool_
+         )
++        # World-Z upper bounds from real rays through cells, not from map
++        # shifting, variance expiry or interpolation. Inf means no evidence.
++        self.global_clearance_bound = xp.full(
++            (self.cell_n, self.cell_n), xp.inf, dtype=self.data_type
++        )
+         self.layer_names = [
+             "elevation",
+             "variance",
+@@ -195,6 +203,7 @@ class ElevationMap:
+         with self.map_lock:
+             self.elevation_map *= 0.0
+             self.global_update_mask.fill(False)
++            self.global_clearance_bound.fill(cp.inf)
+             # Initial variance
+             self.elevation_map[1] += self.initial_variance
+             self.plugin_manager.reset_layers()
+@@ -296,16 +305,23 @@ class ElevationMap:
+             self.global_update_mask = cp.roll(
+                 self.global_update_mask, shift_value, axis=(0, 1)
+             )
++            self.global_clearance_bound = cp.roll(
++                self.global_clearance_bound, shift_value, axis=(0, 1)
++            )
+             self.pad_value(self.elevation_map, shift_value, value=0.0)
+             self.pad_value(self.elevation_map, shift_value, idx=1, value=self.initial_variance)
+             if shift_value[0] > 0:
+                 self.global_update_mask[: shift_value[0], :] = False
++                self.global_clearance_bound[: shift_value[0], :] = cp.inf
+             elif shift_value[0] < 0:
+                 self.global_update_mask[shift_value[0] :, :] = False
++                self.global_clearance_bound[shift_value[0] :, :] = cp.inf
+             if shift_value[1] > 0:
+                 self.global_update_mask[:, : shift_value[1]] = False
++                self.global_clearance_bound[:, : shift_value[1]] = cp.inf
+             elif shift_value[1] < 0:
+                 self.global_update_mask[:, shift_value[1] :] = False
++                self.global_clearance_bound[:, shift_value[1] :] = cp.inf
+             # Plugin layers are computed on-demand; invalidate cache when shifting.
+             self.plugin_manager.reset_layers()
+ 
+@@ -335,6 +351,9 @@ class ElevationMap:
+             (3, self.cell_n, self.cell_n),
+             dtype=self.data_type,
+         )
++        self.ray_clearance_map = cp.full(
++            (self.cell_n, self.cell_n), cp.inf, dtype=self.data_type
++        )
+         self.traversability_input = cp.zeros((self.cell_n, self.cell_n), dtype=self.data_type)
+         self.traversability_mask_dummy = cp.zeros((self.cell_n, self.cell_n), dtype=self.data_type)
+         self.min_filtered = cp.zeros((self.cell_n, self.cell_n), dtype=self.data_type)
+@@ -397,7 +416,8 @@ class ElevationMap:
+         """
+         t -= self.center
+ 
+-    def update_map_with_kernel(self, points_all, channels, R, t, position_noise, orientation_noise):
++    def update_map_with_kernel(self, points_all, channels, R, t, position_noise, orientation_noise,
++                               ray_origin=None):
+         """Update map with new measurement.
+ 
+         Args:
+@@ -417,8 +437,11 @@ class ElevationMap:
+             self.map_snapshot[...] = self.elevation_map
+             self.visibility_map.fill(0.0)
+             self.visibility_map[2].fill(cp.inf)
++            self.ray_clearance_map.fill(cp.inf)
+             t = t.copy()
++            sensor_origin = t.copy() if ray_origin is None else cp.asarray(ray_origin, dtype=t.dtype).copy()
+             t[2] -= self.center[2]
++            sensor_origin[2] -= self.center[2]
+             self.error_counting_kernel(
+                 self.map_snapshot,
+                 points,
+@@ -449,11 +472,13 @@ class ElevationMap:
+                 self.center[1:2],
+                 R,
+                 t,
++                sensor_origin,
+                 self.map_snapshot,
+                 self.normal_map,
+                 points,
+                 self.new_map,
+                 self.visibility_map,
++                self.ray_clearance_map,
+                 size=(points.shape[0]),
+             )
+ 
+@@ -465,6 +490,7 @@ class ElevationMap:
+                 size=(self.cell_n * self.cell_n),
+             )
+             self.global_update_mask |= self.new_map[2] > 0.0
++            self._accumulate_global_clearance()
+ 
+             if self.param.enable_overlap_clearance:
+                 self.clear_overlap_map(t)
+@@ -494,6 +520,16 @@ class ElevationMap:
+         if self.param.enable_normal_estimation:
+             self.update_normal(self.traversability_input)
+ 
++    def _accumulate_global_clearance(self):
++        """Keep actual ray evidence, with current endpoints taking priority."""
++        endpoint = (self.new_map[2] > 0.0) | (self.new_map[5] > 0.0)
++        # Global evidence is geometric. Local normal/recent-update heuristics
++        # must not hide a real ray passing through a departed object's cell.
++        ray_bound = self.ray_clearance_map + self.center[2]
++        self.global_clearance_bound[...] = cp.where(
++            endpoint, cp.inf, cp.minimum(self.global_clearance_bound, ray_bound)
++        )
++
+     def clear_overlap_map(self, t):
+         """Clear overlapping areas around the map center.
+ 
+@@ -543,6 +579,7 @@ class ElevationMap:
+         t: cp._core.core.ndarray,
+         position_noise: float,
+         orientation_noise: float,
++        *, ray_origin=None,
+     ):
+         """Input the point cloud and fuse the new measurements to update the elevation map.
+ 
+@@ -566,6 +603,7 @@ class ElevationMap:
+             cp.asarray(t, dtype=self.data_type),
+             position_noise,
+             orientation_noise,
++            ray_origin=ray_origin,
+         )
+ 
+     def input_image(
+@@ -818,13 +856,15 @@ class ElevationMap:
+         elevation_data=None,
+         variance_data=None,
+         updated_data=None,
++        *, include_clearance=False,
+     ):
+         """Copy newly updated rolling cells for probabilistic global fusion.
+ 
+         Unlike :meth:`export_elevation_snapshot`, this exports variance and an
+         accumulated update mask, then atomically consumes that mask.  Cells
+         merely carried in the rolling posterior are not presented as new,
+-        independent global observations.
++        independent global observations. With include_clearance, a fifth array
++        carries world-Z free-space upper bounds from real rays (Inf otherwise).
+         """
+ 
+         shape = (self.cell_n - 2, self.cell_n - 2)
+@@ -862,8 +902,14 @@ class ElevationMap:
+             self.copy_to_cpu(variance, variance_data)
+             self.copy_to_cpu(updated.astype(cp.uint8), updated_data)
+             center = cp.asnumpy(self.center).astype(np.float64, copy=False)
++            clearance = (
++                cp.asnumpy(self.global_clearance_bound[1:-1, 1:-1])
++                if include_clearance else None
++            )
+             self.global_update_mask.fill(False)
+-        return center, elevation_data, variance_data, updated_data
++            self.global_clearance_bound.fill(cp.inf)
++        result = (center, elevation_data, variance_data, updated_data)
++        return result + (clearance,) if include_clearance else result
+ 
+     def create_elevation_snapshot_buffer(self) -> ElevationSnapshotBuffer:
+         """Allocate one reusable device snapshot and pinned host destination."""
+@@ -877,6 +923,7 @@ class ElevationMap:
+         variance_memory = cp.cuda.alloc_pinned_memory(variance_bytes)
+         updated_memory = cp.cuda.alloc_pinned_memory(updated_bytes)
+         center_memory = cp.cuda.alloc_pinned_memory(center_bytes)
++        clearance_memory = cp.cuda.alloc_pinned_memory(elevation_bytes)
+         elevation_cpu = np.frombuffer(
+             elevation_memory, dtype=np.float32, count=int(np.prod(shape))
+         ).reshape(shape)
+@@ -901,6 +948,10 @@ class ElevationMap:
+             variance_pinned_memory=variance_memory,
+             updated_pinned_memory=updated_memory,
+             center_pinned_memory=center_memory,
++            clearance_gpu=cp.empty(shape, dtype=cp.float32),
++            clearance_cpu=np.frombuffer(clearance_memory, dtype=np.float32,
++                                        count=int(np.prod(shape))).reshape(shape),
++            clearance_pinned_memory=clearance_memory,
+         )
+ 
+     @staticmethod
+@@ -935,7 +986,9 @@ class ElevationMap:
+             )
+             buffer.updated_gpu[...] = updated
+             buffer.center_gpu[...] = self.center
++            buffer.clearance_gpu[...] = self.global_clearance_bound[1:-1, 1:-1]
+             self.global_update_mask.fill(False)
++            self.global_clearance_bound.fill(cp.inf)
+             # All map updates and this device copy use the current stream. The
+             # event lets a separate copy stream wait only for this snapshot,
+             # not for point-cloud kernels submitted afterwards.
+@@ -945,7 +998,8 @@ class ElevationMap:
+     def materialize_elevation_snapshot(
+         buffer: ElevationSnapshotBuffer,
+         stream,
+-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
++        *, include_clearance=False,
++    ) -> Tuple[np.ndarray, ...]:
+         """Asynchronously download one captured snapshot, then wait in worker."""
+ 
+         with stream:
+@@ -974,13 +1028,17 @@ class ElevationMap:
+                 out=buffer.center_cpu,
+                 blocking=False,
+             )
++            if include_clearance:
++                cp.asnumpy(buffer.clearance_gpu, stream=stream,
++                           out=buffer.clearance_cpu, blocking=False)
+         stream.synchronize()
+-        return (
++        result = (
+             buffer.center_cpu,
+             buffer.elevation_cpu,
+             buffer.variance_cpu,
+             buffer.updated_cpu,
+         )
++        return result + (buffer.clearance_cpu,) if include_clearance else result
+ 
+     def trim_memory_pool(self):
+         """Release cached CuPy allocator blocks that are not currently in use."""
+diff --git a/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/elevation_mapping_node.py b/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/elevation_mapping_node.py
+index 28bac05..26c71ba 100755
+--- a/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/elevation_mapping_node.py
++++ b/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/elevation_mapping_node.py
+@@ -265,6 +265,8 @@ class ElevationMappingNode(Node):
+         self._global_snapshot_skipped_count = 0
+         self._global_fused_cell_count = 0
+         self._global_rejected_cell_count = 0
++        self._global_corrected_cell_count = 0
++        self._global_cleared_cell_count = 0
+         self._global_fusion_last_log_time = 0.0
+         if self.enable_global_map:
+             self._global_map = GlobalMapAccumulator(
+@@ -276,8 +278,16 @@ class ElevationMappingNode(Node):
+                 map_frame=self.map_frame,
+                 variance_floor=self.global_map_fusion_variance_floor,
+                 variance_ceiling=self.global_map_fusion_variance_ceiling,
++                initial_elevation=self.global_map_initial_elevation,
++                initial_variance=self.global_map_initial_variance,
++                publish_unobserved_prior=self.global_map_publish_unobserved_prior,
+                 outlier_sigma=self.global_map_outlier_sigma,
+                 max_height_jump=self.global_map_max_height_jump,
++                conflict_confirmations=self.global_map_conflict_confirmations,
++                conflict_tolerance=self.global_map_conflict_tolerance,
++                conflict_max_gap=self.global_map_conflict_max_gap,
++                clearance_confirmations=self.global_map_clearance_confirmations,
++                clearance_margin=self.global_map_clearance_margin,
+             )
+             local_shape = (self._map.cell_n - 2, self._map.cell_n - 2)
+             self._global_map.initialize_lattice(local_shape)
+@@ -393,8 +403,17 @@ class ElevationMappingNode(Node):
+             'global_map_snapshot_buffer_count': 2,
+             'global_map_fusion_variance_floor': 0.0025,
+             'global_map_fusion_variance_ceiling': 4.0,
++            'global_map_initial_elevation': 0.0,
++            'global_map_initial_variance': 10000.0,
++            'global_map_publish_unobserved_prior': False,
+             'global_map_outlier_sigma': 3.0,
+             'global_map_max_height_jump': 0.30,
++            'global_map_conflict_confirmations': 0,
++            'global_map_conflict_tolerance': 0.10,
++            'global_map_conflict_max_gap': 50,
++            'global_map_clearance_confirmations': 0,
++            'global_map_clearance_margin': 0.15,
++            'ray_origin_frame': '',
+             'global_map_flush_fps': 1.0,
+             'global_map_tiles_publish_fps': 2.0,
+             'global_map_tiles_per_message': 8,
+@@ -434,9 +453,34 @@ class ElevationMappingNode(Node):
+         self.global_map_outlier_sigma = float(
+             self.get_parameter('global_map_outlier_sigma').value
+         )
++        self.global_map_initial_elevation = float(
++            self.get_parameter('global_map_initial_elevation').value
++        )
++        self.global_map_initial_variance = float(
++            self.get_parameter('global_map_initial_variance').value
++        )
++        self.global_map_publish_unobserved_prior = bool(
++            self.get_parameter('global_map_publish_unobserved_prior').value
++        )
+         self.global_map_max_height_jump = float(
+             self.get_parameter('global_map_max_height_jump').value
+         )
++        self.global_map_conflict_confirmations = int(
++            self.get_parameter('global_map_conflict_confirmations').value
++        )
++        self.global_map_conflict_tolerance = float(
++            self.get_parameter('global_map_conflict_tolerance').value
++        )
++        self.global_map_conflict_max_gap = int(
++            self.get_parameter('global_map_conflict_max_gap').value
++        )
++        self.global_map_clearance_confirmations = int(
++            self.get_parameter('global_map_clearance_confirmations').value
++        )
++        self.global_map_clearance_margin = float(
++            self.get_parameter('global_map_clearance_margin').value
++        )
++        self.ray_origin_frame = str(self.get_parameter('ray_origin_frame').value)
+         self.global_map_flush_fps = float(self.get_parameter('global_map_flush_fps').value)
+         self.global_map_tiles_publish_fps = float(self.get_parameter('global_map_tiles_publish_fps').value)
+         self.global_map_tiles_per_message = int(self.get_parameter('global_map_tiles_per_message').value)
+@@ -485,6 +529,11 @@ class ElevationMappingNode(Node):
+             )
+         if not math.isfinite(self.global_map_outlier_sigma) or self.global_map_outlier_sigma <= 0.0:
+             raise ValueError('global_map_outlier_sigma must be finite and positive.')
++        if not math.isfinite(self.global_map_initial_elevation):
++            raise ValueError('global_map_initial_elevation must be finite.')
++        if (not math.isfinite(self.global_map_initial_variance)
++                or self.global_map_initial_variance < self.global_map_fusion_variance_floor):
++            raise ValueError('global_map_initial_variance must be finite and at least the floor.')
+         if not math.isfinite(self.global_map_max_height_jump) or self.global_map_max_height_jump <= 0.0:
+             raise ValueError('global_map_max_height_jump must be finite and positive.')
+         self_filter_defaults = {
+@@ -1037,26 +1086,29 @@ class ElevationMappingNode(Node):
+                     elevation,
+                     variance,
+                     updated,
+-                ) = self._map.materialize_elevation_snapshot(slot, copy_stream)
++                    clearance,
++                ) = self._map.materialize_elevation_snapshot(slot, copy_stream, include_clearance=True)
+                 with self._global_fusion_control_lock:
+                     if slot.generation != self._global_map_generation:
+                         continue
+                     started = time.perf_counter()
+                     result = self._global_map.fuse_snapshot(
+-                        center[:2], elevation, variance, updated
++                        center[:2], elevation, variance, updated, clearance
+                     )
+                     elapsed_ms = (time.perf_counter() - started) * 1000.0
+-                if result.written_cells > 0:
++                if result.written_cells > 0 or result.cleared_cells > 0:
+                     with self._global_map_state_lock:
+                         self._global_map_stamp = slot.stamp
+                     self._global_snapshot_fused_count += 1
+                 self._global_fused_cell_count += result.written_cells
+                 self._global_rejected_cell_count += result.rejected_cells
++                self._global_corrected_cell_count += result.corrected_cells
++                self._global_cleared_cell_count += result.cleared_cells
+                 now = time.monotonic()
+                 if now - self._global_fusion_last_log_time >= 5.0:
+                     self.get_logger().info(
+                         "Async global fusion %.1f ms; captured=%d fused=%d "
+-                        "replaced=%d skipped=%d accepted_cells=%d rejected_cells=%d"
++                        "replaced=%d skipped=%d accepted_cells=%d rejected_cells=%d corrected_cells=%d cleared_cells=%d"
+                         % (
+                             elapsed_ms,
+                             self._global_snapshot_captured_count,
+@@ -1065,6 +1117,8 @@ class ElevationMappingNode(Node):
+                             self._global_snapshot_skipped_count,
+                             self._global_fused_cell_count,
+                             self._global_rejected_cell_count,
++                            self._global_corrected_cell_count,
++                            self._global_cleared_cell_count,
+                         )
+                     )
+                     self._global_fusion_last_log_time = now
+@@ -1115,16 +1169,20 @@ class ElevationMappingNode(Node):
+                 elevation,
+                 variance,
+                 updated,
++                clearance,
+             ) = self._map.export_global_observation(
+                 self._global_map_data,
+                 self._global_map_variance_data,
+                 self._global_map_updated_data,
++                include_clearance=True,
+             )
+             result = self._global_map.fuse_snapshot(
+-                center[:2], elevation, variance, updated
++                center[:2], elevation, variance, updated, clearance
+             )
+             self._global_fused_cell_count += result.written_cells
+             self._global_rejected_cell_count += result.rejected_cells
++            self._global_corrected_cell_count += result.corrected_cells
++            self._global_cleared_cell_count += result.cleared_cells
+         except Exception as exc:
+             self._report_global_map_failure("accumulation", exc)
+             return False
+@@ -1135,7 +1193,7 @@ class ElevationMappingNode(Node):
+             else self.get_clock().now().to_msg()
+         )
+         self._global_map_pending_stamp = None
+-        return result.written_cells > 0
++        return result.written_cells > 0 or result.cleared_cells > 0
+ 
+     def _report_global_map_failure(self, operation: str, exc: Exception) -> None:
+         """Stop global expansion loudly while allowing the local map to continue."""
+@@ -1165,7 +1223,7 @@ class ElevationMappingNode(Node):
+         if self._global_map_failed:
+             return
+         if not force:
+-            if not self._global_map.has_observations:
++            if not self._global_map.has_observations and not self.global_map_publish_unobserved_prior:
+                 return
+             if self._global_map_publisher.get_subscription_count() == 0:
+                 return
+@@ -1185,6 +1243,7 @@ class ElevationMappingNode(Node):
+                 view_center,
+                 self.global_map_view_length_x,
+                 self.global_map_view_length_y,
++                exact_size=True,
+             )
+         except Exception as exc:
+             self._report_global_map_failure("window extraction", exc)
+@@ -1218,7 +1277,8 @@ class ElevationMappingNode(Node):
+         self.accumulate_global_map()
+         if self._global_map_failed:
+             return
+-        if not force and not self._global_map.has_observations:
++        if (not force and not self._global_map.has_observations
++                and not self.global_map_publish_unobserved_prior):
+             return
+         if not force and self._global_map_local_publisher.get_subscription_count() == 0:
+             return
+@@ -1929,7 +1989,15 @@ class ElevationMappingNode(Node):
+             t_np = np.array([t.x, t.y, t.z], dtype=np.float32)
+             R = quaternion_matrix([q.x, q.y, q.z, q.w])[:3, :3].astype(np.float32)
+ 
+-        self._map.input_pointcloud(pts, channels, R, t_np, 0, 0)
++        ray_origin = None
++        if self.ray_origin_frame and self.ray_origin_frame != frame_sensor_id:
++            sensor_tf = self.safe_lookup_transform(
++                self.map_frame, self.ray_origin_frame, msg.header.stamp)
++            if sensor_tf is None:
++                return
++            sensor_t = sensor_tf.transform.translation
++            ray_origin = np.array([sensor_t.x, sensor_t.y, sensor_t.z], dtype=np.float32)
++        self._map.input_pointcloud(pts, channels, R, t_np, 0, 0, ray_origin=ray_origin)
+         self._pointcloud_process_counter += 1
+         if self.enable_global_map:
+             self._mark_global_map_dirty(msg.header.stamp)
+diff --git a/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/global_map.py b/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/global_map.py
+index 8eca98b..28bdafc 100644
+--- a/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/global_map.py
++++ b/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/global_map.py
+@@ -35,6 +35,8 @@ class GlobalMapFuseResult:
+     written_cells: int
+     touched_tiles: int
+     rejected_cells: int = 0
++    corrected_cells: int = 0
++    cleared_cells: int = 0
+ 
+ 
+ @dataclass(frozen=True)
+@@ -514,8 +516,16 @@ class GlobalMapAccumulator:
+         map_frame: str = "map",
+         variance_floor: float = 0.0025,
+         variance_ceiling: float = 4.0,
++        initial_elevation: float = 0.0,
++        initial_variance: float = 10000.0,
++        publish_unobserved_prior: bool = False,
+         outlier_sigma: float = 3.0,
+         max_height_jump: float = 0.30,
++        conflict_confirmations: int = 0,
++        conflict_tolerance: float = 0.10,
++        conflict_max_gap: int = 50,
++        clearance_confirmations: int = 0,
++        clearance_margin: float = 0.15,
+     ) -> None:
+         if not math.isfinite(resolution) or resolution <= 0.0:
+             raise ValueError("Global-map resolution must be finite and positive.")
+@@ -536,8 +546,22 @@ class GlobalMapAccumulator:
+             )
+         if not math.isfinite(outlier_sigma) or outlier_sigma <= 0.0:
+             raise ValueError("Global-map outlier sigma must be finite and positive.")
++        if not math.isfinite(initial_elevation):
++            raise ValueError("Global-map initial elevation must be finite.")
++        if not math.isfinite(initial_variance) or initial_variance < variance_floor:
++            raise ValueError("Global-map initial variance must be finite and at least the floor.")
+         if not math.isfinite(max_height_jump) or max_height_jump <= 0.0:
+             raise ValueError("Global-map maximum height jump must be finite and positive.")
++        if int(conflict_confirmations) != conflict_confirmations or conflict_confirmations < 0:
++            raise ValueError("Conflict confirmations must be a non-negative integer.")
++        if not math.isfinite(conflict_tolerance) or conflict_tolerance <= 0.0:
++            raise ValueError("Conflict tolerance must be finite and positive.")
++        if int(conflict_max_gap) != conflict_max_gap or conflict_max_gap < 1:
++            raise ValueError("Conflict maximum gap must be a positive integer.")
++        if int(clearance_confirmations) != clearance_confirmations or clearance_confirmations < 0:
++            raise ValueError("Clearance confirmations must be a non-negative integer.")
++        if not math.isfinite(clearance_margin) or clearance_margin <= 0:
++            raise ValueError("Clearance margin must be finite and positive.")
+ 
+         self.resolution = float(resolution)
+         self.tile_size_cells = int(tile_size_cells)
+@@ -545,8 +569,16 @@ class GlobalMapAccumulator:
+         self.map_frame = str(map_frame)
+         self.variance_floor = float(variance_floor)
+         self.variance_ceiling = float(variance_ceiling)
++        self.initial_elevation = float(initial_elevation)
++        self.initial_variance = float(initial_variance)
++        self.publish_unobserved_prior = bool(publish_unobserved_prior)
+         self.outlier_sigma = float(outlier_sigma)
+         self.max_height_jump = float(max_height_jump)
++        self.conflict_confirmations = int(conflict_confirmations)
++        self.conflict_tolerance = float(conflict_tolerance)
++        self.conflict_max_gap = int(conflict_max_gap)
++        self.clearance_confirmations = int(clearance_confirmations)
++        self.clearance_margin = float(clearance_margin)
+         self._spatial_tile_shape = (self.tile_size_cells, self.tile_size_cells)
+         self._tile_shape = (
+             self._LAYER_COUNT,
+@@ -561,6 +593,11 @@ class GlobalMapAccumulator:
+         self._lock = threading.RLock()
+         self._tiles: "OrderedDict[TileKey, _TileEntry]" = OrderedDict()
+         self._pending: Dict[TileKey, Tuple[int, np.ndarray]] = {}
++        # Temporary evidence is deliberately not restored from disk. Each
++        # correction needs fresh, real updates after a restart or cache eviction.
++        # Per tile: candidate mean, mean observation variance, count, revision.
++        self._conflicts: Dict[TileKey, np.ndarray] = {}
++        self._clearance: Dict[TileKey, np.ndarray] = {}
+         self._visualization_dirty: "OrderedDict[TileKey, None]" = OrderedDict()
+         self._revision = 0
+         self._phase_x: Optional[float] = None
+@@ -716,13 +753,14 @@ class GlobalMapAccumulator:
+         elevation_yx: np.ndarray,
+         variance_yx: Optional[np.ndarray] = None,
+         updated_yx: Optional[np.ndarray] = None,
++        free_upper_bound_yx: Optional[np.ndarray] = None,
+     ) -> GlobalMapFuseResult:
+         """Fuse newly observed local cells into probabilistic global tiles."""
+ 
+         with self._operation_lock:
+             self._ensure_open()
+             return self._fuse_snapshot(
+-                center_xy, elevation_yx, variance_yx, updated_yx
++                center_xy, elevation_yx, variance_yx, updated_yx, free_upper_bound_yx
+             )
+ 
+     def _fuse_snapshot(
+@@ -731,6 +769,7 @@ class GlobalMapAccumulator:
+         elevation_yx: np.ndarray,
+         variance_yx: Optional[np.ndarray],
+         updated_yx: Optional[np.ndarray],
++        free_upper_bound_yx: Optional[np.ndarray],
+     ) -> GlobalMapFuseResult:
+ 
+         local = np.asarray(elevation_yx, dtype=np.float32)
+@@ -755,6 +794,13 @@ class GlobalMapAccumulator:
+                     f"{updated.shape} vs {local.shape}."
+                 )
+         start_ix, start_iy = self._validate_snapshot_geometry(center_xy, local.shape)
++        if free_upper_bound_yx is None:
++            free_upper_bound = np.full(local.shape, np.inf, dtype=np.float32)
++        else:
++            free_upper_bound = np.asarray(free_upper_bound_yx, dtype=np.float32)
++            if free_upper_bound.shape != local.shape:
++                raise ValueError("Free-space upper bounds must match elevation shape.")
++        free_valid = np.isfinite(free_upper_bound) & (self.clearance_confirmations > 0)
+         valid_input = (
+             updated
+             & np.isfinite(local)
+@@ -762,7 +808,7 @@ class GlobalMapAccumulator:
+             & (variance > 0.0)
+         )
+         valid_input_cells = int(valid_input.sum())
+-        if valid_input_cells == 0:
++        if valid_input_cells == 0 and not free_valid.any():
+             return GlobalMapFuseResult(0, 0, 0)
+ 
+         variance = np.clip(
+@@ -778,6 +824,8 @@ class GlobalMapAccumulator:
+         max_ty = (end_iy - 1) // self.tile_size_cells
+         written_cells = 0
+         rejected_cells = 0
++        corrected_cells = 0
++        cleared_cells = 0
+         touched: List[TileKey] = []
+ 
+         with self._lock:
+@@ -811,11 +859,16 @@ class GlobalMapAccumulator:
+                         source_x0 : source_x0 + width,
+                     ]
+                     count = int(valid.sum())
+-                    if count == 0:
++                    free_bound = free_upper_bound[source_y0:source_y0+height, source_x0:source_x0+width]
++                    ray_valid = free_valid[source_y0:source_y0+height, source_x0:source_x0+width]
++                    if count == 0 and not ray_valid.any():
+                         continue
+ 
+                     key = (tile_x, tile_y)
+-                    entry = self._get_tile_locked(key, create=True)
++                    # Rays alone never allocate unobserved tiles.
++                    entry = self._get_tile_locked(key, create=count > 0)
++                    if entry is None:
++                        continue
+                     destination = entry.data[
+                         :,
+                         dest_y0 : dest_y0 + height,
+@@ -831,8 +884,19 @@ class GlobalMapAccumulator:
+                         | ~np.isfinite(destination_variance)
+                         | (destination_count <= 0.0)
+                     )
+-                    destination_height[unseen] = source_height[unseen]
+-                    destination_variance[unseen] = source_variance[unseen]
++                    # Initialize from the explicit prior, without applying an outlier
++                    # gate against an unobserved cell. The observation variance cap
++                    # applies to R, not to the prior P0 (which may be much larger).
++                    first_variance = source_variance[unseen].astype(np.float64)
++                    first_denominator = self.initial_variance + first_variance
++                    first_gain = self.initial_variance / first_denominator
++                    destination_height[unseen] = self.initial_elevation + first_gain * (
++                        source_height[unseen] - self.initial_elevation
++                    )
++                    # P0*R/(P0+R) avoids cancellation in (1-K)*P0 for large P0.
++                    destination_variance[unseen] = np.maximum(
++                        self.variance_floor, self.initial_variance * first_variance / first_denominator
++                    )
+                     destination_count[unseen] = 1.0
+                     destination_revision[unseen] = float(revision)
+ 
+@@ -867,10 +931,84 @@ class GlobalMapAccumulator:
+                         destination_revision[accepted_existing] = float(revision)
+ 
+                     rejected = existing & ~accepted_existing
+-                    accepted = unseen | accepted_existing
++                    corrected = np.zeros(valid.shape, dtype=bool)
++                    if self.conflict_confirmations:
++                        evidence = self._conflicts.get(key)
++                        if evidence is None and rejected.any():
++                            evidence = np.zeros(self._tile_shape, dtype=np.float64)
++                            self._conflicts[key] = evidence
++                        if evidence is not None:
++                            candidate = evidence[:, dest_y0:dest_y0+height, dest_x0:dest_x0+width]
++                            # An accepted observation contradicts the competing
++                            # hypothesis and resets it. Unscanned cells add no vote.
++                            candidate[2, unseen | accepted_existing] = 0
++                            consistent = (
++                                rejected & (candidate[2] > 0)
++                                & (revision - candidate[3] <= self.conflict_max_gap)
++                                & (np.abs(source_height - candidate[0]) <= self.conflict_tolerance)
++                            )
++                            new_candidate = rejected & ~consistent
++                            candidate[0, new_candidate] = source_height[new_candidate]
++                            candidate[1, new_candidate] = source_variance[new_candidate]
++                            candidate[2, new_candidate] = 1
++                            votes = candidate[2, consistent] + 1
++                            candidate[0, consistent] += (
++                                source_height[consistent] - candidate[0, consistent]
++                            ) / votes
++                            candidate[1, consistent] += (
++                                source_variance[consistent] - candidate[1, consistent]
++                            ) / votes
++                            candidate[2, consistent] = votes
++                            candidate[3, rejected] = revision
++                            corrected = rejected & (candidate[2] >= self.conflict_confirmations)
++                            destination_height[corrected] = candidate[0, corrected]
++                            # Rolling posteriors are correlated across frames;
++                            # do not divide their variance by the vote count.
++                            destination_variance[corrected] = np.maximum(
++                                self.variance_floor, candidate[1, corrected]
++                            )
++                            destination_count[corrected] = np.minimum(
++                                destination_count[corrected] + 1, np.float32(16_777_216)
++                            )
++                            destination_revision[corrected] = float(revision)
++                            candidate[2, corrected] = 0
++                    rejected &= ~corrected
++                    corrected_cells += int(corrected.sum())
++                    accepted = unseen | accepted_existing | corrected
++                    cleared = np.zeros(valid.shape, dtype=bool)
++                    evidence = self._clearance.get(key)
++                    if self.clearance_confirmations:
++                        penetrated = (
++                            ray_valid & ~valid
++                            & (destination_count > 0)
++                            & (destination_height > free_bound + self.clearance_margin)
++                        )
++                        if evidence is None and penetrated.any():
++                            evidence = np.zeros((2, *self._spatial_tile_shape), dtype=np.float64)
++                            self._clearance[key] = evidence
++                        if evidence is not None:
++                            votes = evidence[:, dest_y0:dest_y0+height, dest_x0:dest_x0+width]
++                            # Actual endpoints and contradictory free-space rays
++                            # cancel pending clearance; absence of data never votes.
++                            votes[0, valid | (ray_valid & ~penetrated)] = 0
++                            expired = revision - votes[1] > self.conflict_max_gap
++                            votes[0, penetrated & expired] = 0
++                            votes[0, penetrated] += 1
++                            votes[1, penetrated] = revision
++                            cleared = penetrated & (votes[0] >= self.clearance_confirmations)
++                            destination_height[cleared] = self.initial_elevation
++                            destination_variance[cleared] = self.initial_variance
++                            destination_count[cleared] = 0
++                            destination_revision[cleared] = float(revision)
++                            votes[0, cleared] = 0
++                            conflict = self._conflicts.get(key)
++                            if conflict is not None:
++                                conflict[2, dest_y0:dest_y0+height, dest_x0:dest_x0+width][cleared] = 0
++                    clear_count = int(cleared.sum())
++                    cleared_cells += clear_count
+                     accepted_count = int(accepted.sum())
+                     rejected_cells += int(rejected.sum())
+-                    if accepted_count == 0:
++                    if accepted_count == 0 and clear_count == 0:
+                         continue
+                     entry.revision = revision
+                     self._tiles.move_to_end(key)
+@@ -878,7 +1016,7 @@ class GlobalMapAccumulator:
+                     touched.append(key)
+                     written_cells += accepted_count
+ 
+-                    valid_y, valid_x = np.nonzero(accepted)
++                    valid_y, valid_x = np.nonzero(accepted | cleared)
+                     self._extend_bounds_locked(
+                         overlap_ix0 + int(valid_x.min()),
+                         overlap_ix0 + int(valid_x.max()),
+@@ -892,6 +1030,8 @@ class GlobalMapAccumulator:
+             written_cells=written_cells,
+             touched_tiles=len(set(touched)),
+             rejected_cells=rejected_cells,
++            corrected_cells=corrected_cells,
++            cleared_cells=cleared_cells,
+         )
+ 
+     def extract_window(
+@@ -899,18 +1039,20 @@ class GlobalMapAccumulator:
+         center_xy: Sequence[float],
+         length_x: float,
+         length_y: float,
++        exact_size: bool = False,
+     ) -> GlobalMapWindow:
+         """Materialize a finite dense ROI for GridMap/RViz consumers."""
+ 
+         with self._operation_lock:
+             self._ensure_open()
+-            return self._extract_window(center_xy, length_x, length_y)
++            return self._extract_window(center_xy, length_x, length_y, exact_size)
+ 
+     def _extract_window(
+         self,
+         center_xy: Sequence[float],
+         length_x: float,
+         length_y: float,
++        exact_size: bool = False,
+     ) -> GlobalMapWindow:
+ 
+         center = np.asarray(center_xy, dtype=np.float64)
+@@ -928,9 +1070,12 @@ class GlobalMapAccumulator:
+                 raise RuntimeError("Global-map lattice has not been initialized.")
+             expected_x_even = math.isclose(self._phase_x, 0.5)
+             expected_y_even = math.isclose(self._phase_y, 0.5)
+-            if (cells_x % 2 == 0) != expected_x_even:
++            # RViz can request an exact odd-sized ROI from an even lattice.
++            # Its center then shifts by half a cell; metadata below describes
++            # that shift, preserving the coordinates of every stored cell.
++            if not exact_size and (cells_x % 2 == 0) != expected_x_even:
+                 cells_x += 1
+-            if (cells_y % 2 == 0) != expected_y_even:
++            if not exact_size and (cells_y % 2 == 0) != expected_y_even:
+                 cells_y += 1
+ 
+             center_ix = int(round(center[0] / self.resolution))
+@@ -981,6 +1126,17 @@ class GlobalMapAccumulator:
+                     self._evict_if_needed_locked()
+             self._evict_if_needed_locked()
+ 
++            # A numeric prior is not an observation. Optimistic views expose
++            # its mean/variance while preserving observation_count=0;
++            # strict views continue to mask those cells as unknown.
++            unobserved = output[self._OBSERVATION_COUNT] <= 0.0
++            output[self._ELEVATION][unobserved] = (
++                self.initial_elevation if self.publish_unobserved_prior else np.nan
++            )
++            output[self._VARIANCE][unobserved] = (
++                self.initial_variance if self.publish_unobserved_prior else np.nan
++            )
++
+             actual_center_x = (
+                 start_ix + self._phase_x - 0.5 + 0.5 * cells_x
+             ) * self.resolution
+@@ -1039,9 +1195,9 @@ class GlobalMapAccumulator:
+                     key, _ = self._visualization_dirty.popitem(last=False)
+                     entry = self._get_tile_locked(key, create=False)
+                     if entry is not None:
+-                        result.append(
+-                            (key, entry.data[self._ELEVATION].copy())
+-                        )
++                        elevation = entry.data[self._ELEVATION].copy()
++                        elevation[entry.data[self._OBSERVATION_COUNT] <= 0.0] = np.nan
++                        result.append((key, elevation))
+                     self._evict_if_needed_locked()
+             return result
+ 
+@@ -1074,6 +1230,8 @@ class GlobalMapAccumulator:
+                 with self._lock:
+                     self._tiles.clear()
+                     self._pending.clear()
++                    self._conflicts.clear()
++                    self._clearance.clear()
+                     self._visualization_dirty.clear()
+                     self._min_ix = self._max_ix = None
+                     self._min_iy = self._max_iy = None
+@@ -1133,6 +1291,8 @@ class GlobalMapAccumulator:
+                 entry = _TileEntry(data, revision, revision)
+             elif create:
+                 data = np.full(self._tile_shape, np.nan, dtype=np.float32)
++                data[self._ELEVATION].fill(self.initial_elevation)
++                data[self._VARIANCE].fill(self.initial_variance)
+                 data[self._OBSERVATION_COUNT].fill(0.0)
+                 data[self._LAST_UPDATE_REVISION].fill(0.0)
+                 entry = _TileEntry(data, 0, 0)
+@@ -1153,6 +1313,8 @@ class GlobalMapAccumulator:
+             return
+         while len(self._tiles) > self.max_tiles_in_memory:
+             key, entry = self._tiles.popitem(last=False)
++            self._conflicts.pop(key, None)
++            self._clearance.pop(key, None)
+             if entry.revision > entry.persisted_revision:
+                 self._enqueue_tile_locked(key, entry)
+ 
+@@ -1204,8 +1366,15 @@ class GlobalMapAccumulator:
+             ],
+             "variance_floor": self.variance_floor,
+             "variance_ceiling": self.variance_ceiling,
++            "initial_elevation": self.initial_elevation,
++            "initial_variance": self.initial_variance,
+             "outlier_sigma": self.outlier_sigma,
+             "max_height_jump": self.max_height_jump,
++            "conflict_confirmations": self.conflict_confirmations,
++            "conflict_tolerance": self.conflict_tolerance,
++            "conflict_max_gap": self.conflict_max_gap,
++            "clearance_confirmations": self.clearance_confirmations,
++            "clearance_margin": self.clearance_margin,
+             "phase_x": self._phase_x,
+             "phase_y": self._phase_y,
+             "min_ix": self._min_ix,
+@@ -1221,6 +1390,8 @@ class GlobalMapAccumulator:
+         expected_fusion = {
+             "variance_floor": self.variance_floor,
+             "variance_ceiling": self.variance_ceiling,
++            "initial_elevation": self.initial_elevation,
++            "initial_variance": self.initial_variance,
+             "outlier_sigma": self.outlier_sigma,
+             "max_height_jump": self.max_height_jump,
+         }
+@@ -1233,6 +1404,10 @@ class GlobalMapAccumulator:
+                     f"Global tile database metadata mismatch for '{name}': "
+                     f"database={actual!r}, requested={expected!r}."
+                 )
++        for name in ("conflict_confirmations", "conflict_tolerance", "conflict_max_gap",
++                     "clearance_confirmations", "clearance_margin"):
++            if name in metadata and metadata[name] != getattr(self, name):
++                raise ValueError(f"Global tile database metadata mismatch for '{name}'.")
+         phase_x = metadata.get("phase_x")
+         phase_y = metadata.get("phase_y")
+         for name, phase in (("phase_x", phase_x), ("phase_y", phase_y)):
+diff --git a/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/kernels/custom_kernels.py b/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/kernels/custom_kernels.py
+index 87d1b7b..ecf755d 100644
+--- a/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/kernels/custom_kernels.py
++++ b/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/kernels/custom_kernels.py
+@@ -171,8 +171,8 @@ def add_points_kernel(
+     enable_visibility_cleanup=True,
+ ):
+     add_points_kernel = cp.ElementwiseKernel(
+-        in_params="raw U center_x, raw U center_y, raw U R, raw U t, raw U map, raw U norm_map",
+-        out_params="raw U p, raw T newmap, raw T visibility",
++        in_params="raw U center_x, raw U center_y, raw U R, raw U t, raw U origin, raw U map, raw U norm_map",
++        out_params="raw U p, raw T newmap, raw T visibility, raw T ray_clearance",
+         preamble=map_utils(
+             resolution,
+             width,
+@@ -223,16 +223,16 @@ def add_points_kernel(
+             }
+             if (${enable_visibility_cleanup}) {
+                 float ray_x, ray_y, ray_z;
+-                float ray_length = ray_vector(t[0], t[1], t[2], x, y, z, ray_x, ray_y, ray_z);
++                float ray_length = ray_vector(origin[0], origin[1], origin[2], x, y, z, ray_x, ray_y, ray_z);
+                 ray_length = fminf(ray_length, (float)${max_ray_length});
+-                float end_x = t[0] + ray_x * ray_length;
+-                float end_y = t[1] + ray_y * ray_length;
+-                float end_z = t[2] + ray_z * ray_length;
++                float end_x = origin[0] + ray_x * ray_length;
++                float end_y = origin[1] + ray_y * ray_length;
++                float end_z = origin[2] + ray_z * ray_length;
+                 float start_grid_x = (
+-                    (t[0] - center_x[0]) / ${resolution} + 0.5f * (${width} - 1) + 0.5f
++                    (origin[0] - center_x[0]) / ${resolution} + 0.5f * (${width} - 1) + 0.5f
+                 );
+                 float start_grid_y = (
+-                    (t[1] - center_y[0]) / ${resolution} + 0.5f * (${height} - 1) + 0.5f
++                    (origin[1] - center_y[0]) / ${resolution} + 0.5f * (${height} - 1) + 0.5f
+                 );
+                 float end_grid_x = (
+                     (end_x - center_x[0]) / ${resolution} + 0.5f * (${width} - 1) + 0.5f
+@@ -283,7 +283,11 @@ def add_points_kernel(
+                     int nidx = cell_y * ${width} + cell_x;
+                     float exit = fminf(fminf(next_x, next_y), 1.0f);
+                     float sample = 0.5f * (entry + exit);
+-                    U nz = t[2] + (end_z - t[2]) * sample;
++                    U nz = origin[2] + (end_z - origin[2]) * sample;
++
++                    // Export geometric free-space before local age/normal
++                    // heuristics. Endpoint priority is applied after all rays.
++                    atomic_min_float(&ray_clearance[nidx], nz);
+ 
+                     U nmap_h = map[get_map_idx(nidx, 0)];
+                     U nmap_v = map[get_map_idx(nidx, 1)];
+diff --git a/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/tests/test_global_map.py b/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/tests/test_global_map.py
+index 59035a9..7ce5d92 100644
+--- a/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/tests/test_global_map.py
++++ b/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/tests/test_global_map.py
+@@ -8,6 +8,11 @@ from elevation_mapping_cupy.global_map import (
+ )
+ 
+ 
++def _first_posterior(height, variance=1.0):
++    # Independent scalar precision oracle for the configured h0=0, P0=10000.
++    return (np.asarray(height, dtype=np.float64) / (1.0 + variance / 10000.0)).astype(np.float32)
++
++
+ def _make_global(**overrides):
+     params = {
+         "resolution": 1.0,
+@@ -36,11 +41,12 @@ def test_variance_weighted_fusion_and_nan_does_not_erase_history():
+     second = np.array([[1.2, np.nan], [np.nan, 3.8]], dtype=np.float32)
+     global_map.fuse_snapshot((0.0, 0.0), second, variance)
+     window = global_map.extract_window((0.0, 0.0), 2.0, 2.0)
+-    expected = np.array([[1.1, 2.0], [3.0, 3.9]], dtype=np.float32)
++    expected = np.array([[2.2 / 2.0001, 2.0 / 1.0001],
++                         [3.0 / 1.0001, 7.8 / 2.0001]], dtype=np.float32)
+     assert np.allclose(window.elevation_yx, expected)
+     assert np.allclose(
+         window.variance_yx,
+-        np.array([[0.5, 1.0], [1.0, 0.5]], dtype=np.float32),
++        np.array([[1 / 2.0001, 1 / 1.0001], [1 / 1.0001, 1 / 2.0001]], dtype=np.float32),
+     )
+     assert np.array_equal(
+         window.observation_count_yx,
+@@ -65,7 +71,7 @@ def test_only_explicitly_updated_cells_are_fused():
+     assert result.written_cells == 1
+     assert np.allclose(
+         window.elevation_yx,
+-        np.array([[1.1, 1.0], [1.0, 1.0]], dtype=np.float32),
++        np.array([[2.2 / 2.0001, 1 / 1.0001], [1 / 1.0001, 1 / 1.0001]], dtype=np.float32),
+     )
+ 
+ 
+@@ -83,10 +89,85 @@ def test_large_conflicting_height_is_rejected():
+     assert result.rejected_cells == 4
+     assert np.all(
+         global_map.extract_window((0.0, 0.0), 2.0, 2.0).elevation_yx
+-        == 1.0
++        == _first_posterior(1.0, variance=0.01)
+     )
+ 
+ 
++@pytest.mark.parametrize('new_height', [-.75, 1.5])
++def test_consistent_real_conflicts_correct_old_height_after_ten_updates(new_height):
++    m = _make_global(conflict_confirmations=10)
++    var = np.full((2, 2), .01, np.float32)
++    m.fuse_snapshot((0, 0), np.full((2, 2), .2, np.float32), var)
++    for _ in range(9):
++        result = m.fuse_snapshot((0, 0), np.full((2, 2), new_height, np.float32), var)
++        assert result.rejected_cells == 4 and result.corrected_cells == 0
++        assert m.extract_window((0, 0), 2, 2).elevation_yx[0, 0] == pytest.approx(.2, abs=.001)
++    result = m.fuse_snapshot((0, 0), np.full((2, 2), new_height, np.float32), var)
++    assert result.corrected_cells == 4 and result.rejected_cells == 0
++    window = m.extract_window((0, 0), 2, 2)
++    assert np.allclose(window.elevation_yx, new_height)
++    assert np.allclose(window.variance_yx, .01)  # no false independent-frame certainty
++    assert (window.observation_count_yx == 2).all()
++
++
++def test_single_spike_oscillating_conflicts_and_unscanned_cells_do_not_erase_history():
++    m = _make_global(conflict_confirmations=3)
++    var = np.full((2, 2), .01, np.float32)
++    old = np.full((2, 2), .2, np.float32)
++    m.fuse_snapshot((0, 0), old, var)
++    for k in range(12):
++        result = m.fuse_snapshot((0, 0), np.full((2, 2), -.75 if k % 2 else 1.5, np.float32), var)
++        assert result.corrected_cells == 0
++    for _ in range(10):
++        m.fuse_snapshot((0, 0), np.full((2, 2), -.75, np.float32), var, np.zeros((2, 2), bool))
++    assert np.allclose(m.extract_window((0, 0), 2, 2).elevation_yx, .2, atol=.001)
++
++
++def test_accepted_old_height_resets_conflict_evidence():
++    m = _make_global(conflict_confirmations=3)
++    var = np.full((2, 2), .01, np.float32)
++    old = np.full((2, 2), .2, np.float32)
++    low = np.full((2, 2), -.75, np.float32)
++    m.fuse_snapshot((0, 0), old, var)
++    for _ in range(2): m.fuse_snapshot((0, 0), low, var)
++    m.fuse_snapshot((0, 0), old, var)
++    for _ in range(2):
++        assert m.fuse_snapshot((0, 0), low, var).corrected_cells == 0
++    assert m.fuse_snapshot((0, 0), low, var).corrected_cells == 4
++
++
++def test_conflict_gap_expires_old_votes_and_different_cells_cannot_supply_votes():
++    m = _make_global(conflict_confirmations=3, conflict_max_gap=2)
++    var = np.full((2, 2), .01, np.float32)
++    old = np.full((2, 2), .2, np.float32)
++    low = np.full((2, 2), -.75, np.float32)
++    mask = np.array([[True, False], [False, False]])
++    m.fuse_snapshot((0, 0), old, var)
++    for _ in range(2): m.fuse_snapshot((0, 0), low, var, mask)
++    for _ in range(3): m.fuse_snapshot((0, 0), old, var, ~mask)
++    assert m.fuse_snapshot((0, 0), low, var, mask).corrected_cells == 0
++    assert m.fuse_snapshot((0, 0), low, var, mask).corrected_cells == 0
++    assert m.fuse_snapshot((0, 0), low, var, mask).corrected_cells == 1
++
++
++def test_corrected_height_persists_but_partial_conflict_votes_do_not(tmp_path):
++    args = dict(storage_path=str(tmp_path / 'map.sqlite3'), conflict_confirmations=3)
++    m = _make_global(**args)
++    var = np.full((2, 2), .01, np.float32)
++    old = np.full((2, 2), .2, np.float32)
++    low = np.full((2, 2), -.75, np.float32)
++    m.fuse_snapshot((0, 0), old, var)
++    for _ in range(2): m.fuse_snapshot((0, 0), low, var)
++    m.close()
++    m = _make_global(**args, resume_from_disk=True)
++    for _ in range(2): assert m.fuse_snapshot((0, 0), low, var).corrected_cells == 0
++    assert m.fuse_snapshot((0, 0), low, var).corrected_cells == 4
++    m.close()
++    m = _make_global(**args, resume_from_disk=True)
++    assert np.allclose(m.extract_window((0, 0), 2, 2).elevation_yx, -.75)
++    m.close()
++
++
+ def test_far_jump_allocates_only_observed_tiles_not_intermediate_rectangle():
+     global_map = _make_global(tile_size_cells=4)
+     local = np.ones((2, 2), dtype=np.float32)
+@@ -106,13 +187,13 @@ def test_window_xy_axes_and_gridmap_conversion_use_independent_oracle():
+     global_map.fuse_snapshot((0.0, 0.0), natural)
+     window = global_map.extract_window((0.0, 0.0), 2.0, 2.0)
+ 
+-    assert np.array_equal(window.elevation_yx, natural)
++    assert np.array_equal(window.elevation_yx, _first_posterior(natural))
+     # Natural storage is row=+Y,col=+X. GridMap's matrix axes are row=-X,
+     # col=-Y, so this conversion must match the rolling-map publisher.
+     expected_grid_map = np.array(
+         [[22.0, 12.0], [21.0, 11.0]], dtype=np.float32
+     )
+-    assert np.array_equal(window.elevation_grid_map_copy(), expected_grid_map)
++    assert np.array_equal(window.elevation_grid_map_copy(), _first_posterior(expected_grid_map))
+ 
+ 
+ def test_local_window_is_the_same_xy_crop_as_the_global_window():
+@@ -127,9 +208,9 @@ def test_local_window_is_the_same_xy_crop_as_the_global_window():
+     full = global_map.extract_window((0.0, 0.0), 8.0, 6.0)
+     local = global_map.extract_window((1.0, -1.0), 4.0, 2.0)
+ 
+-    expected_full = np.flip(natural.T, axis=(0, 1))
++    expected_full = np.flip(_first_posterior(natural).T, axis=(0, 1))
+     natural_local = natural[1:3, 3:7]
+-    expected_local = np.flip(natural_local.T, axis=(0, 1))
++    expected_local = np.flip(_first_posterior(natural_local).T, axis=(0, 1))
+ 
+     assert np.array_equal(full.elevation_grid_map_copy(), expected_full)
+     assert np.array_equal(local.elevation_grid_map_copy(), expected_local)
+@@ -152,7 +233,7 @@ def test_odd_and_mixed_parity_lattices_round_trip(shape):
+     restored = global_map.extract_window(center, shape[1], shape[0])
+ 
+     assert restored.elevation_yx.shape == shape
+-    assert np.array_equal(restored.elevation_yx, source)
++    assert np.array_equal(restored.elevation_yx, _first_posterior(source))
+ 
+ 
+ def test_far_negative_tile_boundaries_keep_exact_values():
+@@ -168,7 +249,7 @@ def test_far_negative_tile_boundaries_keep_exact_values():
+ 
+     assert set(global_map.all_tile_keys()) == {(-3, -2), (-2, -2), (-3, -1), (-2, -1)}
+     restored = global_map.extract_window((-6.0, -3.0), 3.0, 2.0)
+-    assert np.array_equal(restored.elevation_yx, source)
++    assert np.array_equal(restored.elevation_yx, _first_posterior(source))
+ 
+ 
+ def test_float32_center_drift_is_snapped_to_integer_cells():
+@@ -201,6 +282,64 @@ def test_empty_window_read_does_not_allocate_tiles():
+     assert global_map.tile_count() == 0
+ 
+ 
++def test_published_prior_is_zero_with_large_variance_but_not_an_observation():
++    global_map = _make_global(publish_unobserved_prior=True)
++    initial = global_map.extract_window((0, 0), 10, 10)
++    assert (initial.elevation_yx == 0).all()
++    assert (initial.variance_yx == 10000).all()
++    assert (initial.observation_count_yx == 0).all()
++    assert not global_map.has_observations
++    assert global_map.tile_count() == 0
++    height = np.array([[2., np.nan], [np.nan, np.nan]], np.float32)
++    global_map.fuse_snapshot((0, 0), height, np.ones((2, 2), np.float32))
++    updated = global_map.extract_window((0, 0), 2, 2)
++    assert updated.elevation_yx[0, 0] == pytest.approx(2 / 1.0001)
++    assert updated.observation_count_yx[0, 0] == 1
++    assert updated.elevation_yx[1, 1] == 0
++    assert updated.variance_yx[1, 1] == 10000
++    assert updated.observation_count_yx[1, 1] == 0
++
++
++def test_exact_fifteen_metre_view_keeps_coordinates_on_even_lattice():
++    global_map = _make_global(resolution=.04, initial_elevation=-1., publish_unobserved_prior=True)
++    initial = global_map.extract_window((0, 0), 15, 15, exact_size=True)
++    assert initial.elevation_yx.shape == (375, 375)
++    assert initial.length_x == 15 and initial.length_y == 15
++    assert initial.center_x == pytest.approx(.02)
++    assert initial.center_y == pytest.approx(.02)
++    assert (initial.elevation_yx == -1).all()
++    assert (initial.variance_yx == 10000).all()
++    source = np.array([[np.nan, np.nan], [np.nan, -.75]], np.float32)
++    global_map.fuse_snapshot((0, 0), source, np.ones((2, 2), np.float32))
++    updated = global_map.extract_window((0, 0), 15, 15, exact_size=True)
++    assert updated.elevation_yx[187, 187] == pytest.approx(-1 + .25 / 1.0001)
++    assert updated.observation_count_yx[187, 187] == 1
++    assert updated.center_x + (187.5 - 375/2)*.04 == pytest.approx(.02)
++    assert (updated.elevation_yx[updated.observation_count_yx == 0] == -1).all()
++
++
++def test_only_lidar_update_mask_changes_prior_even_when_other_heights_are_finite():
++    global_map = _make_global(publish_unobserved_prior=True)
++    values = np.full((2, 2), 7., np.float32)
++    updated = np.array([[False, False], [False, True]])
++    global_map.fuse_snapshot((0, 0), values, np.ones((2, 2), np.float32), updated)
++    first = global_map.extract_window((0, 0), 2, 2)
++    assert (first.elevation_yx[~updated] == 0).all()
++    assert (first.variance_yx[~updated] == 10000).all()
++    assert (first.observation_count_yx[~updated] == 0).all()
++    measured = first.elevation_yx[1, 1]
++    values[:] = 9.
++    updated[:] = False
++    updated[0, 0] = True
++    global_map.fuse_snapshot((0, 0), values, np.ones((2, 2), np.float32), updated)
++    second = global_map.extract_window((0, 0), 2, 2)
++    assert second.elevation_yx[1, 1] == measured
++    assert second.observation_count_yx[1, 1] == 1
++    assert second.elevation_yx[0, 0] == pytest.approx(9 / 1.0001)
++    assert second.elevation_yx[0, 1] == 0
++    assert second.variance_yx[0, 1] == 10000
++
++
+ def test_block_downsampling_preserves_thin_observations_and_block_centers():
+     tile = np.full((4, 4), np.nan, dtype=np.float32)
+     tile[1, 1] = 2.0  # Not on the old [::2, ::2] sampling lattice.
+@@ -221,8 +360,8 @@ def test_extract_window_preserves_old_and_new_distant_areas():
+ 
+     old_window = global_map.extract_window((0.0, 0.0), 2.0, 2.0)
+     new_window = global_map.extract_window((6.0, 0.0), 2.0, 2.0)
+-    assert np.all(old_window.elevation_yx == 1.0)
+-    assert np.all(new_window.elevation_yx == 7.0)
++    assert np.all(old_window.elevation_yx == _first_posterior(1.0))
++    assert np.all(new_window.elevation_yx == _first_posterior(7.0))
+ 
+ 
+ def test_sqlite_eviction_reload_and_resume(tmp_path):
+@@ -248,8 +387,10 @@ def test_sqlite_eviction_reload_and_resume(tmp_path):
+         map_frame="map",
+     )
+     resumed.initialize_lattice((2, 2))
+-    assert np.all(resumed.extract_window((0.0, 0.0), 2.0, 2.0).elevation_yx == 1.0)
+-    assert np.all(resumed.extract_window((10.0, 10.0), 2.0, 2.0).elevation_yx == 5.0)
++    assert np.all(resumed.extract_window((0.0, 0.0), 2.0, 2.0).elevation_yx == _first_posterior(1.0))
++    assert np.all(resumed.extract_window((10.0, 10.0), 2.0, 2.0).elevation_yx == _first_posterior(5.0))
++    resumed.fuse_snapshot((0.0, 0.0), np.full((2, 2), 1.2, dtype=np.float32))
++    assert np.allclose(resumed.extract_window((0.0, 0.0), 2.0, 2.0).elevation_yx, 2.2 / 2.0001)
+     resumed.close()
+ 
+ 
+@@ -350,11 +491,60 @@ def test_clear_serializes_a_concurrent_fusion_after_the_delete(tmp_path, monkeyp
+ 
+     assert fuse_done.is_set()
+     assert np.all(
+-        global_map.extract_window((10.0, 10.0), 2.0, 2.0).elevation_yx == 7.0
++        global_map.extract_window((10.0, 10.0), 2.0, 2.0).elevation_yx == _first_posterior(7.0)
+     )
+     global_map.close()
+ 
+ 
++def test_first_measurement_uses_large_prior_without_clipping_it_to_sensor_cap():
++    global_map = _make_global(tile_size_cells=4)
++    assert global_map.initial_elevation == 0.0
++    assert global_map.initial_variance == 10000.0
++    height = np.array([[2.0, np.nan], [np.nan, np.nan]], dtype=np.float32)
++    variance = np.full((2, 2), 100.0, dtype=np.float32)  # R is capped at 4; P0 is not.
++    result = global_map.fuse_snapshot((0.0, 0.0), height, variance)
++    window = global_map.extract_window((0.0, 0.0), 2.0, 2.0)
++    assert result.written_cells == 1  # First observation is not rejected against h0=0.
++    assert window.elevation_yx[0, 0] == pytest.approx(20000.0 / 10004.0)
++    assert window.variance_yx[0, 0] == pytest.approx(40000.0 / 10004.0)
++    assert window.observation_count_yx[0, 0] == 1
++    assert np.isnan(window.elevation_yx[0, 1:]).all()
++    assert np.isnan(window.elevation_yx[1]).all()
++    # Allocated prior-only cells remain numeric in storage but are hidden from HT/RViz.
++    for entry in global_map._tiles.values():
++        unknown = entry.data[global_map._OBSERVATION_COUNT] == 0
++        assert (entry.data[global_map._ELEVATION][unknown] == 0).all()
++        assert (entry.data[global_map._VARIANCE][unknown] == 10000).all()
++    finite_visualized = sum(np.isfinite(data).sum()
++                            for _, data in global_map.take_visualization_tiles(10))
++    assert finite_visualized == 1
++
++
++def test_resume_rejects_changed_prior_and_restores_same_prior(tmp_path):
++    db_path = str(tmp_path / "prior.sqlite3")
++    global_map = _make_global(storage_path=db_path)
++    global_map.fuse_snapshot((0.0, 0.0), np.ones((2, 2), dtype=np.float32))
++    global_map.close()
++    with pytest.raises(ValueError, match="initial_variance"):
++        _make_global(storage_path=db_path, resume_from_disk=True, initial_variance=1000.0)
++    resumed = _make_global(storage_path=db_path, resume_from_disk=True)
++    window = resumed.extract_window((0, 0), 2, 2)
++    assert np.allclose(window.elevation_yx, 1 / 1.0001)
++    assert np.allclose(window.variance_yx, 1 / 1.0001)
++    resumed.close()
++
++
++@pytest.mark.parametrize("parameters", [
++    {"initial_elevation": float("nan")}, {"initial_elevation": float("inf")},
++    {"initial_variance": 0}, {"initial_variance": -1},
++    {"initial_variance": float("nan")}, {"initial_variance": float("inf")},
++    {"initial_variance": 0.001},
++])
++def test_invalid_prior_is_rejected(parameters):
++    with pytest.raises(ValueError, match="initial"):
++        _make_global(**parameters)
++
++
+ def test_closed_store_rejects_further_writes():
+     global_map = _make_global()
+     global_map.close()
+diff --git a/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/tests/test_clearance_snapshot.py b/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/tests/test_clearance_snapshot.py
+new file mode 100644
+index 0000000..9ee1029
+--- /dev/null
++++ b/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/tests/test_clearance_snapshot.py
+@@ -0,0 +1,89 @@
++"""Real CUDA ray traversal through a departed obstacle into persistent tiles."""
++from pathlib import Path
++import numpy as np
++import cupy as cp
++import pytest
++
++from elevation_mapping_cupy.parameter import Parameter
++from elevation_mapping_cupy.elevation_mapping import ElevationMap
++from elevation_mapping_cupy.global_map import GlobalMapAccumulator
++
++
++@pytest.fixture
++def rolling():
++    root=Path(__file__).resolve().parents[2]/'config/core'
++    p=Parameter(use_chainer=False,enable_builtin_traversability=False,
++                plugin_config_file=str(root/'plugin_config.yaml'))
++    p.resolution=.1;p.map_length=4.;p.enable_normal_estimation=False
++    p.enable_overlap_clearance=False;p.update()
++    return ElevationMap(p)
++
++
++def seed(rolling):
++    row,col=rolling.cell_n//2,rolling.cell_n//2+10
++    rolling.elevation_map[0,row,col]=.8
++    rolling.elevation_map[1,row,col]=.01
++    rolling.elevation_map[2,row,col]=1
++    rolling.elevation_map[4,row,col]=5
++    rolling.normal_map[0,row,col]=1
++    rolling.global_update_mask[row,col]=True
++    return row,col
++
++
++@pytest.mark.parametrize('normal,age', [((1,0,0),5), ((0,1,0),5), ((0,0,0),5), ((1,0,0),0)])
++def test_real_cuda_rays_clear_a_departed_obstacle_without_ground_endpoint_in_its_cell(rolling,normal,age):
++    row,col=seed(rolling)
++    rolling.normal_map[:,row,col]=cp.asarray(normal,dtype=cp.float32)
++    rolling.elevation_map[4,row,col]=age
++    global_map=GlobalMapAccumulator(resolution=.1,initial_elevation=-1,
++        publish_unobserved_prior=True,clearance_confirmations=3)
++    global_map.initialize_lattice((rolling.cell_n-2,rolling.cell_n-2))
++    slot=rolling.create_elevation_snapshot_buffer()
++    stream=rolling.create_elevation_snapshot_copy_stream()
++    def fuse():
++        rolling.capture_elevation_snapshot_gpu(slot)
++        center,height,var,updated,free=rolling.materialize_elevation_snapshot(
++            slot,stream,include_clearance=True)
++        result=global_map.fuse_snapshot(center[:2],height,var,updated,free)
++        return result,free
++    fuse()
++    assert global_map.has_observations
++    for frame in range(3):
++        # The message is already in map/base coordinates. Its actual scanner
++        # is 1 m above that frame; the endpoint is beyond the old obstacle.
++        points=np.array([[1.8,.05,-.7]],np.float32)
++        rolling.input_pointcloud(points,['x','y','z'],np.eye(3,dtype=np.float32),
++            np.zeros(3,np.float32),0,0,ray_origin=np.array([0,.05,1],np.float32))
++        rolling.update_time()
++        result,bound=fuse()
++        assert np.isfinite(bound[row-1,col-1])
++        assert result.cleared_cells==(1 if frame==2 else 0)
++    view=global_map.extract_window((0,0),4,4)
++    assert view.observation_count_yx[row-1,col-1]==0
++    assert view.elevation_yx[row-1,col-1]==-1
++    assert view.variance_yx[row-1,col-1]==10000
++    # No new ray/cloud: repeated exports must not repeat the clearance event.
++    assert np.isinf(rolling.export_global_observation(include_clearance=True)[4]).all()
++
++
++def test_actual_endpoint_discards_queued_free_space_evidence(rolling):
++    row,col=seed(rolling)
++    rolling.global_clearance_bound[row,col]=-.2
++    rolling.new_map.fill(0);rolling.visibility_map[2].fill(cp.inf)
++    rolling.new_map[2,row,col]=1
++    rolling.ray_clearance_map[row,col]=-.5
++    rolling._accumulate_global_clearance()
++    assert cp.isinf(rolling.global_clearance_bound[row,col])
++
++
++def test_clearance_bound_stays_in_world_z_and_moves_with_cells(rolling):
++    row,col=seed(rolling)
++    rolling.global_clearance_bound[row,col]=.3
++    rolling.shift_map_xy(cp.array([1,2],cp.int32))
++    assert float(rolling.global_clearance_bound[row+2,col+1])==pytest.approx(.3)
++    assert cp.isinf(rolling.global_clearance_bound[:2,:]).all()
++    assert cp.isinf(rolling.global_clearance_bound[:,:1]).all()
++    rolling.shift_map_z(cp.float32(.5))
++    assert float(rolling.global_clearance_bound[row+2,col+1])==pytest.approx(.3)
++    rolling.clear()
++    assert cp.isinf(rolling.global_clearance_bound).all()
+diff --git a/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/tests/test_global_clearance.py b/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/tests/test_global_clearance.py
+new file mode 100644
+index 0000000..0ba3d00
+--- /dev/null
++++ b/src/vendor/elevation/elevation_mapping_cupy/elevation_mapping_cupy/tests/test_global_clearance.py
+@@ -0,0 +1,110 @@
++"""Retraction requires positive ray evidence, never mere absence of data."""
++import numpy as np
++import pytest
++
++from elevation_mapping_cupy.global_map import GlobalMapAccumulator
++
++
++def make(**kw):
++    args=dict(resolution=1.,tile_size_cells=4,max_tiles_in_memory=16,
++              initial_elevation=-1.,publish_unobserved_prior=True,
++              clearance_confirmations=3)
++    args.update(kw)
++    m=GlobalMapAccumulator(**args)
++    m.initialize_lattice((2,2))
++    return m
++
++
++def observe(m, height=1.):
++    return m.fuse_snapshot((0,0),np.full((2,2),height,np.float32),
++                           np.full((2,2),.01,np.float32))
++
++
++def ray(m, bound=0., **kw):
++    return m.fuse_snapshot((0,0),np.full((2,2),np.nan,np.float32),
++                           free_upper_bound_yx=np.full((2,2),bound,np.float32),**kw)
++
++
++def test_person_departure_clears_without_a_new_endpoint_and_can_reobserve_ground():
++    m=make();observe(m)
++    for _ in range(2):
++        assert ray(m).cleared_cells==0
++        assert (m.extract_window((0,0),2,2).observation_count_yx==1).all()
++    result=ray(m)
++    assert result.cleared_cells==4 and result.written_cells==0
++    w=m.extract_window((0,0),2,2)
++    assert (w.elevation_yx==-1).all() and (w.variance_yx==10000).all()
++    assert (w.observation_count_yx==0).all()
++    assert (w.last_update_revision_yx==m.revision).all()
++    observe(m,-.75)
++    assert np.allclose(m.extract_window((0,0),2,2).elevation_yx,-.75,atol=.001)
++
++
++def test_current_endpoint_wins_and_resets_pending_clearance():
++    m=make();observe(m)
++    ray(m);ray(m)
++    result=m.fuse_snapshot((0,0),np.ones((2,2),np.float32),
++                           np.full((2,2),.01,np.float32),
++                           free_upper_bound_yx=np.zeros((2,2),np.float32))
++    assert result.cleared_cells==0
++    assert ray(m).cleared_cells==0 and ray(m).cleared_cells==0
++    assert ray(m).cleared_cells==4
++
++
++@pytest.mark.parametrize('bound',[1.,2.,np.inf,np.nan,-np.inf])
++def test_rays_not_below_the_recorded_surface_and_missing_rays_preserve_it(bound):
++    m=make();observe(m)
++    for _ in range(6):assert ray(m,bound).cleared_cells==0
++    assert (m.extract_window((0,0),2,2).observation_count_yx>0).all()
++
++
++def test_free_space_does_not_allocate_tiles_or_count_as_an_observation():
++    m=make()
++    for _ in range(5):assert ray(m).cleared_cells==0
++    assert m.tile_count()==0 and not m.has_observations
++
++
++def test_a_ray_above_the_surface_resets_clearance_evidence():
++    m=make();observe(m);ray(m);ray(m)
++    ray(m,2.)
++    assert ray(m).cleared_cells==0 and ray(m).cleared_cells==0
++    assert ray(m).cleared_cells==4
++
++
++def test_missing_data_does_not_count_as_a_clearance_vote():
++    m=make();observe(m);ray(m)
++    for _ in range(20):ray(m,np.inf)
++    assert (m.extract_window((0,0),2,2).observation_count_yx==1).all()
++    assert ray(m).cleared_cells==0
++    assert ray(m).cleared_cells==4
++
++
++def test_clearance_is_disabled_unless_enabled_and_checks_geometry():
++    m=make(clearance_confirmations=0);observe(m)
++    for _ in range(5):assert ray(m).cleared_cells==0
++    with pytest.raises(ValueError,match='shape'):
++        m.fuse_snapshot((0,0),np.ones((2,2)),free_upper_bound_yx=np.zeros((3,2)))
++
++
++def test_cleared_height_and_count_persist_but_partial_votes_do_not(tmp_path):
++    args=dict(storage_path=str(tmp_path/'map.sqlite3'))
++    m=make(**args);observe(m);ray(m);ray(m);m.close()
++    m=make(**args,resume_from_disk=True)
++    assert ray(m).cleared_cells==0 and ray(m).cleared_cells==0
++    assert ray(m).cleared_cells==4
++    m.close()
++    m=make(**args,resume_from_disk=True)
++    w=m.extract_window((0,0),2,2)
++    assert (w.elevation_yx==-1).all() and (w.observation_count_yx==0).all()
++    m.close()
++
++
++def test_only_ray_covered_cells_are_retracted():
++    m=make();observe(m)
++    bound=np.array([[0,np.inf],[np.inf,np.inf]],np.float32)
++    for _ in range(3):
++        result=m.fuse_snapshot((0,0),np.full((2,2),np.nan),free_upper_bound_yx=bound)
++    assert result.cleared_cells==1
++    w=m.extract_window((0,0),2,2)
++    assert w.observation_count_yx[0,0]==0
++    assert np.count_nonzero(w.observation_count_yx)==3

@@ -14,5 +14,6 @@ setup(
     install_requires=["setuptools", "numpy"],
     entry_points={"console_scripts": [
         "costmap_ht_fusion = scout_ht_traversability.node:main",
+        "global_elevation_mapper = scout_ht_traversability.elevation_manager:main",
     ]},
 )

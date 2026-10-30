@@ -60,7 +60,10 @@
 #include <lanelet2_core/Forward.h>
 #include <lanelet2_core/geometry/Polygon.h>
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -162,6 +165,14 @@ CostmapGenerator::CostmapGenerator(const rclcpp::NodeOptions & node_options)
   param_listener_ = std::make_shared<::costmap_generator_node::ParamListener>(
     this->get_node_parameters_interface());
   param_ = std::make_shared<::costmap_generator_node::Params>(param_listener_->get_params());
+  if (!std::isfinite(param_->input_timeout) || param_->input_timeout <= 0) {
+    throw std::invalid_argument("input_timeout must be finite and positive");
+  }
+  if (param_->publish_in_vehicle_frame &&
+      (param_->costmap_frame != "base_link" || param_->vehicle_frame != "base_link" ||
+       param_->map_frame != "base_link" || param_->use_wayarea || param_->use_parkinglot)) {
+    throw std::invalid_argument("Local inspection requires base_link frames and no map-area layers");
+  }
 
   // Lanelet map subscriber
   sub_lanelet_bin_map_ = this->create_subscription<autoware_map_msgs::msg::LaneletMapBin>(
@@ -266,7 +277,11 @@ void CostmapGenerator::onTimer()
   autoware_utils::ScopedTimeTrack scoped_time_track(__func__, *time_keeper_);
   stop_watch.tic();
 
-  if (!param_->activate_by_scenario) set_current_pose();
+  if (
+    !param_->activate_by_scenario && !param_->publish_in_vehicle_frame &&
+    !param_->publish_continuously) {
+    set_current_pose();
+  }
 
   if (!isActive()) {
     // Publish ProcessingTime
@@ -278,16 +293,32 @@ void CostmapGenerator::onTimer()
   }
 
   // Get current pose
-  time_keeper_->start_track("lookupTransform");
   geometry_msgs::msg::TransformStamped tf;
-  try {
-    tf =
-      tf_buffer_.lookupTransform(param_->costmap_frame, param_->vehicle_frame, tf2::TimePointZero);
-  } catch (tf2::TransformException & ex) {
-    RCLCPP_ERROR(this->get_logger(), "%s", ex.what());
-    return;
+  {
+    // The nested timing scope must also end on a freshness hold or TF failure.
+    // Otherwise the outer onTimer scope throws while unwinding and kills the container.
+    autoware_utils::ScopedTimeTrack lookup_track("lookupTransform", *time_keeper_);
+    try {
+      tf =
+        tf_buffer_.lookupTransform(param_->costmap_frame, param_->vehicle_frame, tf2::TimePointZero);
+      if (strictInputTime()) {
+        const auto age = now().seconds() - rclcpp::Time(tf.header.stamp).seconds();
+        if (
+          !inputsFresh() ||
+          (param_->costmap_frame != param_->vehicle_frame &&
+           (rclcpp::Time(tf.header.stamp).nanoseconds() <= 0 || age < -0.05 ||
+            age > param_->input_timeout))) {
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "Costmap held: waiting for fresh sensor inputs and vehicle TF");
+          return;
+        }
+      }
+    } catch (tf2::TransformException & ex) {
+      RCLCPP_ERROR(this->get_logger(), "%s", ex.what());
+      return;
+    }
   }
-  time_keeper_->end_track("lookupTransform");
 
   set_grid_center(tf);
 
@@ -296,14 +327,21 @@ void CostmapGenerator::onTimer()
     costmap_[LayerName::primitives] = generatePrimitivesCostmap();
   }
 
-  if (param_->use_objects && objects_) {
-    autoware_utils::ScopedTimeTrack st("generateObjectsCostmap()", *time_keeper_);
-    costmap_[LayerName::objects] = generateObjectsCostmap(objects_);
-  }
+  try {
+    if (param_->use_objects && objects_) {
+      autoware_utils::ScopedTimeTrack st("generateObjectsCostmap()", *time_keeper_);
+      costmap_[LayerName::objects] = generateObjectsCostmap(objects_);
+    }
 
-  if (param_->use_points && points_) {
-    autoware_utils::ScopedTimeTrack st("generatePointsCostmap()", *time_keeper_);
-    costmap_[LayerName::points] = generatePointsCostmap(points_, tf.transform.translation.z);
+    if (param_->use_points && points_) {
+      autoware_utils::ScopedTimeTrack st("generatePointsCostmap()", *time_keeper_);
+      costmap_[LayerName::points] = generatePointsCostmap(points_, tf.transform.translation.z);
+    }
+  } catch (const tf2::TransformException & error) {
+    RCLCPP_WARN_THROTTLE(
+      get_logger(), *get_clock(), 2000, "Costmap held: sensor transform unavailable: %s",
+      error.what());
+    return;
   }
 
   {
@@ -327,20 +365,41 @@ void CostmapGenerator::set_grid_center(const geometry_msgs::msg::TransformStampe
 
 bool CostmapGenerator::isActive()
 {
+  if (param_->publish_in_vehicle_frame) return true;
   if (!lanelet_map_) {
     return false;
   }
+  if (param_->publish_continuously) return true;
 
   if (param_->activate_by_scenario) {
     if (!scenario_) return false;
+    if (
+      param_->activate_in_lane_driving &&
+      scenario_->current_scenario == autoware_internal_planning_msgs::msg::Scenario::LANEDRIVING)
+      return true;
     const auto & s = scenario_->activating_scenarios;
-    return std::any_of(s.begin(), s.end(), [](const auto scenario) {
-      return scenario == autoware_internal_planning_msgs::msg::Scenario::PARKING;
+    return std::any_of(s.begin(), s.end(), [this](const auto scenario) {
+      return scenario == autoware_internal_planning_msgs::msg::Scenario::PARKING ||
+             (param_->activate_in_lane_driving &&
+              scenario == autoware_internal_planning_msgs::msg::Scenario::LANEDRIVING);
     });
   }
 
   if (!current_pose_) return false;
   return isInParkingLot(lanelet_map_, current_pose_->pose);
+}
+
+bool CostmapGenerator::inputsFresh() const
+{
+  const auto fresh = [this](const std_msgs::msg::Header & header) {
+    const double stamp = header.stamp.sec + header.stamp.nanosec * 1e-9;
+    const double age = now().seconds() - stamp;
+    return !header.frame_id.empty() && header.stamp.nanosec < 1000000000 && stamp > 0 &&
+           age >= -0.05 && age <= param_->input_timeout;
+  };
+  return (!param_->use_points || (points_ && fresh(points_->header))) &&
+         (!param_->use_objects || (objects_ && fresh(objects_->header))) &&
+         (param_->use_points || param_->use_objects);
 }
 
 void CostmapGenerator::initGridmap()
@@ -361,9 +420,15 @@ grid_map::Matrix CostmapGenerator::generatePointsCostmap(
 {
   geometry_msgs::msg::TransformStamped points2costmap;
   try {
-    points2costmap = tf_buffer_.lookupTransform(
-      param_->costmap_frame, in_points->header.frame_id, tf2::TimePointZero);
+    if (strictInputTime()) {
+      points2costmap = tf_buffer_.lookupTransform(
+        param_->costmap_frame, in_points->header.frame_id, rclcpp::Time(in_points->header.stamp));
+    } else {
+      points2costmap = tf_buffer_.lookupTransform(
+        param_->costmap_frame, in_points->header.frame_id, tf2::TimePointZero);
+    }
   } catch (const tf2::TransformException & ex) {
+    if (strictInputTime()) throw;
     RCLCPP_ERROR_THROTTLE(
       rclcpp::get_logger("costmap_generator"), *get_clock(), 1000, "%s", ex.what());
   }
@@ -381,7 +446,7 @@ grid_map::Matrix CostmapGenerator::generatePointsCostmap(
 
 PredictedObjects::ConstSharedPtr transformObjects(
   const tf2_ros::Buffer & tf_buffer, const PredictedObjects::ConstSharedPtr in_objects,
-  const std::string & target_frame_id, const std::string & src_frame_id)
+  const std::string & target_frame_id, const std::string & src_frame_id, bool strict_time)
 {
   auto objects = std::make_shared<PredictedObjects>();
   *objects = *in_objects;
@@ -389,8 +454,12 @@ PredictedObjects::ConstSharedPtr transformObjects(
 
   geometry_msgs::msg::TransformStamped objects2costmap;
   try {
-    objects2costmap = tf_buffer.lookupTransform(target_frame_id, src_frame_id, tf2::TimePointZero);
+    objects2costmap =
+      strict_time ? tf_buffer.lookupTransform(
+                      target_frame_id, src_frame_id, rclcpp::Time(in_objects->header.stamp))
+                  : tf_buffer.lookupTransform(target_frame_id, src_frame_id, tf2::TimePointZero);
   } catch (const tf2::TransformException & ex) {
+    if (strict_time) throw;
     RCLCPP_ERROR(rclcpp::get_logger("costmap_generator"), "%s", ex.what());
   }
 
@@ -409,8 +478,8 @@ grid_map::Matrix CostmapGenerator::generateObjectsCostmap(
   const PredictedObjects::ConstSharedPtr in_objects)
 {
   const auto object_frame = in_objects->header.frame_id;
-  const auto transformed_objects =
-    transformObjects(tf_buffer_, in_objects, param_->costmap_frame, object_frame);
+  const auto transformed_objects = transformObjects(
+    tf_buffer_, in_objects, param_->costmap_frame, object_frame, strictInputTime());
 
   grid_map::Matrix objects_costmap = objects2costmap_.makeCostmapFromObjects(
     costmap_, param_->expand_polygon_size, param_->size_of_expansion_kernel, transformed_objects);
@@ -446,20 +515,12 @@ grid_map::Matrix CostmapGenerator::generatePrimitivesCostmap()
 grid_map::Matrix CostmapGenerator::generateCombinedCostmap()
 {
   // assuming combined_costmap is calculated by element wise max operation
-  grid_map::GridMap combined_costmap = costmap_;
-
-  combined_costmap[LayerName::combined].setConstant(param_->grid_min_value);
-
-  combined_costmap[LayerName::combined] =
-    combined_costmap[LayerName::combined].cwiseMax(combined_costmap[LayerName::points]);
-
-  combined_costmap[LayerName::combined] =
-    combined_costmap[LayerName::combined].cwiseMax(combined_costmap[LayerName::primitives]);
-
-  combined_costmap[LayerName::combined] =
-    combined_costmap[LayerName::combined].cwiseMax(combined_costmap[LayerName::objects]);
-
-  return combined_costmap[LayerName::combined];
+  grid_map::Matrix combined = grid_map::Matrix::Constant(
+    costmap_.getSize().x(), costmap_.getSize().y(), param_->grid_min_value);
+  combined = combined.cwiseMax(costmap_[LayerName::points]);
+  combined = combined.cwiseMax(costmap_[LayerName::primitives]);
+  combined = combined.cwiseMax(costmap_[LayerName::objects]);
+  return combined;
 }
 
 void CostmapGenerator::publishCostmap(
@@ -469,6 +530,15 @@ void CostmapGenerator::publishCostmap(
   std_msgs::msg::Header header;
   header.frame_id = param_->costmap_frame;
   header.stamp = this->now();
+  if (strictInputTime()) {
+    auto stamp = rclcpp::Time(header.stamp);
+    if (param_->use_points && points_) stamp = std::min(stamp, rclcpp::Time(points_->header.stamp));
+    if (param_->use_objects && objects_)
+      stamp = std::min(stamp, rclcpp::Time(objects_->header.stamp));
+    if (param_->costmap_frame != param_->vehicle_frame)
+      stamp = std::min(stamp, rclcpp::Time(tf.header.stamp));
+    header.stamp = stamp;
+  }
 
   // Publish OccupancyGrid
   nav_msgs::msg::OccupancyGrid out_occupancy_grid;
@@ -480,10 +550,12 @@ void CostmapGenerator::publishCostmap(
   pub_occupancy_grid_->publish(out_occupancy_grid);
 
   // Publish GridMap
-  auto out_gridmap_msg = grid_map::GridMapRosConverter::toMessage(costmap);
-  out_gridmap_msg->header = header;
-  out_gridmap_msg->info.pose.position.z = tf.transform.translation.z;
-  pub_costmap_->publish(*out_gridmap_msg);
+  if (pub_costmap_->get_subscription_count() > 0) {
+    auto out_gridmap_msg = grid_map::GridMapRosConverter::toMessage(costmap);
+    out_gridmap_msg->header = header;
+    out_gridmap_msg->info.pose.position.z = tf.transform.translation.z;
+    pub_costmap_->publish(*out_gridmap_msg);
+  }
 
   // Publish ProcessingTime
   autoware_internal_debug_msgs::msg::Float64Stamped processing_time_msg;

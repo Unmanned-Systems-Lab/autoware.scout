@@ -11,5 +11,11 @@
       depth_stabilization: 0
       publish_depth_map: true
       publish_point_cloud: false
+    sensors:
+      sensors_image_sync: false
+      sensors_pub_rate: 200.0
+      publish_imu: true
+      publish_imu_raw: true
+      publish_cam_imu_transf: true
     pos_tracking:
       pos_tracking_enabled: false

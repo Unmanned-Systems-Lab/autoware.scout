@@ -2,6 +2,9 @@
 <launch>
   <arg name="start_sensor_drivers" default="true"/>
   <arg name="launch_vehicle_interface" default="true"/>
+  <arg name="publish_lane_driving_costmap" default="true" description="publish the existing costmap in lane driving as well as parking"/>
+  <arg name="scout_ht_enforce" default="false" description="enable fused-costmap stopping and sampled lane paths; requires HT perception"/>
+  <let name="launch_scout_ht_module" value="true" if="$(var scout_ht_enforce)"/>
   <!-- Essential parameters -->
   <arg name="map_path"  description="point cloud and lanelet2 map directory path"/>
   <arg name="vehicle_model" default="scout_vehicle" description="vehicle model name"/>
@@ -17,7 +20,7 @@
   <!-- launch module preset -->
   <arg
     name="planning_module_preset"
-    default="robosense_m1_obstacle_stop_inlane_avoidance"
+    default="$(eval &quot;'scout_ht_terrain' if '$(var scout_ht_enforce)'.lower() == 'true' else 'robosense_m1_obstacle_stop_inlane_avoidance'&quot;)"
     description="planning module preset"
   />
   <arg name="control_module_preset" default="real_vehicle_minimal" description="control module preset"/>
@@ -100,6 +103,9 @@
     default="true"
     description="switch to temporary freespace replanning when a stopped obstacle persists"
   />
+  <!-- Parking has a separate planner and must not bypass the lane HT guard. -->
+  <let name="launch_freespace_bypass_coordinator" value="false" if="$(eval &quot;'$(var scout_ht_enforce)'.lower() == 'true' or '$(var planning_module_preset)' == 'scout_ht_terrain'&quot;)"/>
+  <let name="launch_parking_module" value="false" if="$(eval &quot;'$(var scout_ht_enforce)'.lower() == 'true' or '$(var planning_module_preset)' == 'scout_ht_terrain'&quot;)"/>
 
   <include file="$(find-pkg-share autoware_launch)/launch/autoware.launch.xml">
     <!-- Common -->

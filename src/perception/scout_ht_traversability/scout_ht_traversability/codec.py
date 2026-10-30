@@ -78,4 +78,5 @@ def decode_terrain(message):
         np.stack([layer(f"ht_dir_{k}") for k in range(8)]), layer("ht_valid"),
         float(info.resolution), planar_pose(info.pose.position, info.pose.orientation),
         np.stack([layer(name) for name in names]) if all(n in layers for n in names) else None,
+        layer("ht_observed") if "ht_observed" in layers else None,
     )

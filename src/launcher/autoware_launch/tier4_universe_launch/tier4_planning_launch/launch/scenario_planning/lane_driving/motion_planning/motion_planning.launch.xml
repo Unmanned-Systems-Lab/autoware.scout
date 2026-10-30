@@ -14,10 +14,16 @@
   <arg name="launch_boundary_departure_prevention_module" default="true"/>
   <arg name="launch_road_user_stop_module" default="true"/>
   <arg name="launch_motion_velocity_planner" default="true"/>
+  <arg name="launch_scout_ht_module" default="false"/>
   <arg name="launch_module_list_end" default="&quot;&quot;]"/>
 
   <!-- assemble launch config for motion velocity planner -->
   <arg name="motion_velocity_planner_launch_modules" default="["/>
+  <let
+    name="motion_velocity_planner_launch_modules"
+    value="$(eval &quot;'$(var motion_velocity_planner_launch_modules)' + 'scout_ht_planning::VelocityModule, '&quot;)"
+    if="$(var launch_scout_ht_module)"
+  />
   <let
     name="motion_velocity_planner_launch_modules"
     value="$(eval &quot;'$(var motion_velocity_planner_launch_modules)' + 'autoware::motion_velocity_planner::ObstacleStopModule, '&quot;)"
@@ -136,6 +142,7 @@
           <param from="$(var vehicle_param_file)"/>
           <param from="$(var nearest_search_param_path)"/>
           <param from="$(var path_sampler_param_path)"/>
+          <param name="scout_ht.enabled" value="$(var launch_scout_ht_module)"/>
           <!-- composable node config -->
           <extra_arg name="use_intra_process_comms" value="false"/>
         </composable_node>

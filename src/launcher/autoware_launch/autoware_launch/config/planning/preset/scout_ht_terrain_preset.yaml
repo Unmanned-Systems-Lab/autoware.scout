@@ -1,0 +1,13 @@
+# Opt-in terrain planning. Retain the existing obstacle and validator modules.
+launch:
+  - arg:
+      name: motion_path_planner_type
+      default: path_sampler
+  - arg:
+      name: launch_scout_ht_module
+      default: "true"
+  - arg:
+      name: launch_parking_module
+      default: "false"
+  - include:
+      file: $(find-pkg-share autoware_launch)/config/planning/preset/robosense_m1_obstacle_stop_inlane_avoidance_preset.yaml

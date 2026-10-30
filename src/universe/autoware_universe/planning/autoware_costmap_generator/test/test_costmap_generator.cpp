@@ -21,8 +21,10 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using autoware::costmap_generator::CostmapGenerator;
@@ -136,6 +138,132 @@ public:
     lanelet_map_ = nullptr;
   }
 
+  bool lane_driving_active(bool enabled, bool in_activation_list)
+  {
+    costmap_generator_->lanelet_map_ = lanelet_map_;
+    costmap_generator_->param_->activate_by_scenario = true;
+    costmap_generator_->param_->activate_in_lane_driving = enabled;
+    auto scenario = std::make_shared<Scenario>();
+    if (in_activation_list)
+      scenario->activating_scenarios.push_back(Scenario::LANEDRIVING);
+    else
+      scenario->current_scenario = Scenario::LANEDRIVING;
+    costmap_generator_->scenario_ = scenario;
+    return costmap_generator_->isActive();
+  }
+
+  void check_input_freshness()
+  {
+    auto & node = *costmap_generator_;
+    node.param_->use_points = true;
+    node.param_->use_objects = false;
+    node.param_->input_timeout = .5;
+    EXPECT_FALSE(node.inputsFresh());
+    auto points = std::make_shared<sensor_msgs::msg::PointCloud2>();
+    points->header.frame_id = "map";
+    points->header.stamp = node.now();
+    node.points_ = points;
+    EXPECT_TRUE(node.inputsFresh());
+    points->header.stamp = node.now() - rclcpp::Duration::from_seconds(1);
+    EXPECT_FALSE(node.inputsFresh());
+    points->header.stamp = node.now() + rclcpp::Duration::from_seconds(1);
+    EXPECT_FALSE(node.inputsFresh());
+    points->header.stamp.sec = -1;
+    EXPECT_FALSE(node.inputsFresh());
+  }
+
+  void check_missing_tf()
+  {
+    auto points = std::make_shared<sensor_msgs::msg::PointCloud2>();
+    points->header.frame_id = "missing_sensor";
+    points->header.stamp = costmap_generator_->now();
+    costmap_generator_->param_->activate_in_lane_driving = true;
+    EXPECT_THROW(costmap_generator_->generatePointsCostmap(points, 0), tf2::TransformException);
+  }
+
+  void check_published_source_stamp()
+  {
+    auto & node = *costmap_generator_;
+    node.param_->activate_by_scenario = true;
+    node.param_->activate_in_lane_driving = true;
+    node.param_->use_points = true;
+    node.param_->use_objects = false;
+    auto peer = std::make_shared<rclcpp::Node>("costmap_stamp_peer");
+    nav_msgs::msg::OccupancyGrid::ConstSharedPtr received;
+    auto sub = peer->create_subscription<nav_msgs::msg::OccupancyGrid>(
+      "/costmap_generator/output/occupancy_grid", 1,
+      [&](nav_msgs::msg::OccupancyGrid::ConstSharedPtr msg) { received = msg; });
+    auto points = std::make_shared<sensor_msgs::msg::PointCloud2>();
+    points->header.frame_id = "map";
+    points->header.stamp = node.now() - rclcpp::Duration::from_seconds(.2);
+    geometry_msgs::msg::TransformStamped tf;
+    tf.header.stamp = node.now();
+    tf.transform.rotation.w = 1;
+    rclcpp::executors::SingleThreadedExecutor exec;
+    exec.add_node(peer);
+    exec.add_node(costmap_generator_);
+    for (int i = 0; i < 12 && !received; ++i) {
+      node.points_ = points;
+      node.publishCostmap(node.costmap_, tf);
+      exec.spin_some();
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    ASSERT_NE(received, nullptr);
+    EXPECT_EQ(received->header.stamp, points->header.stamp);
+  }
+
+  bool continuous_active(bool enabled, bool has_map)
+  {
+    auto & node = *costmap_generator_;
+    node.param_->publish_continuously = enabled;
+    node.param_->activate_by_scenario = true;
+    node.scenario_.reset();
+    node.lanelet_map_ = has_map ? lanelet_map_ : nullptr;
+    return node.isActive();
+  }
+
+  void check_timer_early_return(bool missing_tf, bool without_scenario = false)
+  {
+    auto & node = *costmap_generator_;
+    node.timer_->cancel();
+    node.lanelet_map_ = lanelet_map_;
+    node.param_->activate_by_scenario = true;
+    node.param_->activate_in_lane_driving = true;
+    node.param_->use_points = true;
+    node.param_->use_objects = false;
+    node.param_->publish_continuously = without_scenario;
+    if (!without_scenario) {
+      auto publisher = node.create_publisher<Scenario>("~/input/scenario", 1);
+      Scenario scenario;
+      scenario.current_scenario = Scenario::LANEDRIVING;
+      for (int i = 0; i < 50 && !node.scenario_; ++i) {
+        publisher->publish(scenario);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        node.update_data();
+      }
+      ASSERT_NE(node.scenario_, nullptr);
+    } else {
+      ASSERT_FALSE(node.scenario_);
+      ASSERT_TRUE(node.strictInputTime());
+    }
+    ASSERT_TRUE(node.isActive());
+    if (!missing_tf) {
+      geometry_msgs::msg::TransformStamped tf;
+      tf.header.frame_id = node.param_->costmap_frame;
+      tf.child_frame_id = node.param_->vehicle_frame;
+      tf.header.stamp = node.now();
+      tf.transform.rotation.w = 1;
+      ASSERT_TRUE(node.tf_buffer_.setTransform(tf, "test", true));
+    }
+    // No sensor points: the successful TF path must hit the freshness hold.
+    // Both branches previously left lookupTransform open and terminated in the
+    // outer ScopedTimeTrack destructor. Repeat to check later timer invocations too.
+    ASSERT_FALSE(node.points_);
+    for (int i = 0; i < 3; ++i) {
+      EXPECT_NO_THROW(node.onTimer());
+    }
+  }
+
   std::shared_ptr<CostmapGenerator> costmap_generator_;
   lanelet::LaneletMapPtr lanelet_map_;
 };
@@ -172,4 +300,47 @@ TEST_F(TestCostmapGenerator, testIsActive)
   EXPECT_TRUE(test_is_active_by_scenario());
   EXPECT_FALSE(test_is_active_by_scenario(false));
   EXPECT_FALSE(test_is_active_by_scenario(true, true));
+}
+
+TEST_F(TestCostmapGenerator, LaneDrivingPublicationIsExplicitAndKeepsLegacyDefaults)
+{
+  EXPECT_FALSE(lane_driving_active(false, false));
+  EXPECT_FALSE(lane_driving_active(false, true));
+  EXPECT_TRUE(lane_driving_active(true, false));
+  EXPECT_TRUE(lane_driving_active(true, true));
+}
+
+TEST_F(TestCostmapGenerator, FreshInputsRequiredInLaneDrivingMode)
+{
+  check_input_freshness();
+}
+TEST_F(TestCostmapGenerator, MissingSensorTfCannotPublishAWhiteMap)
+{
+  check_missing_tf();
+}
+TEST_F(TestCostmapGenerator, OutputTimestampIsNotNewerThanSensorData)
+{
+  check_published_source_stamp();
+}
+
+TEST_F(TestCostmapGenerator, MissingTfDoesNotTerminateTimerOrLaterUpdates)
+{
+  check_timer_early_return(true);
+}
+
+TEST_F(TestCostmapGenerator, MissingSensorInputDoesNotTerminateTimerOrLaterUpdates)
+{
+  check_timer_early_return(false);
+}
+
+TEST_F(TestCostmapGenerator, ContinuousPublicationNeedsMapButNotScenarioAndIsOptIn)
+{
+  EXPECT_FALSE(continuous_active(false, true));
+  EXPECT_FALSE(continuous_active(true, false));
+  EXPECT_TRUE(continuous_active(true, true));
+}
+
+TEST_F(TestCostmapGenerator, ContinuousPublicationStillRejectsMissingRealSensorInputs)
+{
+  check_timer_early_return(false, true);
 }

@@ -1,0 +1,46 @@
+/elevation_mapping_node:
+  ros__parameters:
+    map_frame: map
+    corrected_map_frame: map
+    base_frame: base_link
+    initialize_frame_id: [base_link]
+    use_initializer_at_start: false
+    enable_drift_corrected_TF_publishing: false
+    self_filter_enabled: false
+    pointcloud_qos_reliability: best_effort
+    pointcloud_qos_depth: 2
+    # Cloud coordinates are base_link; rays originate at the physical lidar.
+    ray_origin_frame: rslidar
+    subscribers:
+      lidar:
+        topic_name: /sensing/lidar/concatenated/pointcloud
+        data_type: pointcloud
+    # ELE fuses only cells updated by a real cloud, not repeated publications.
+    enable_global_map: true
+    global_map_resume_from_disk: true
+    global_map_initial_elevation: -1.0
+    global_map_initial_variance: 10000.0
+    global_map_publish_unobserved_prior: true
+    global_map_async_fusion: true
+    global_map_snapshot_buffer_count: 3
+    global_map_fusion_variance_floor: 0.0025
+    global_map_fusion_variance_ceiling: 4.0
+    global_map_outlier_sigma: 3.0
+    global_map_max_height_jump: 0.30
+    # Reconsider old terrain only after ten consistent real cell updates.
+    global_map_conflict_confirmations: 10
+    global_map_conflict_tolerance: 0.10
+    global_map_conflict_max_gap: 50
+    # Retract old heights only when real rays repeatedly pass below them.
+    global_map_clearance_confirmations: 3
+    global_map_clearance_margin: 0.15
+    global_map_flush_fps: 1.0
+    global_map_view_length_x: 15.0
+    global_map_view_length_y: 15.0
+    global_map_view_follow_robot: true
+    enable_builtin_traversability: false
+    enable_global_map_local_view: true
+    global_map_local_topic: /elevation_mapping_node/elevation_map_global_local
+    global_map_local_length_x: 10.0
+    global_map_local_length_y: 10.0
+    global_map_local_publish_fps: 5.0

@@ -56,6 +56,14 @@ Scout UI 地址：**http://127.0.0.1:8090/index.html**。集成启动默认不�
 
 ## 启动后检查
 
+原始 costmap 与 HT 融合图现使用 **0.04 米/格**，完整范围保持 70×70 米。
+正常启动后可用以下命令核对（`resolution` 约为 `0.04`，宽高均为 `1750`）：
+
+```bash
+source /mnt/nvme0n1/autoware/autoware.scout/setup_env.bash
+ros2 topic echo --once /planning/scenario_planning/parking/costmap_generator/occupancy_grid --field info
+```
+
 ```bash
 curl -fsS http://127.0.0.1:8090/health
 curl -fsS http://127.0.0.1:8090/autoware_status | python3 -c 'import json,sys; print(json.load(sys.stdin)["ui_actions_enabled"])'
@@ -130,3 +138,21 @@ ros2 bag record -s mcap --max-bag-size 4294967296 \
 这套启动包含大量 ROS 节点、感知与规划组件以及 RViz，不是只加载一张地图。2026-10-20 的一次启动日志中，ROS launch 开始后约 94 秒才开始批量启动节点，随后地图加载又用了约 5 秒；主要等待发生在整套 launch 初始化，不是地图文件读取。只需网页地图操作时，不必反复重启整套程序；不需要 RViz 时可将 `rviz:=false`，减少图形负载。
 
 Autoware 的路线起点始终取车辆当前定位；UI 中绘制的首点用于定义地图首段，不再作为途经点下发。RViz 中规划轨迹可能保留车后约 5 米供规划器计算，红色 `obstacle_stop` 横线是停止墙，不是路线起点。在线生成 Scout 地图时，若车辆定位有效、与首段车道对齐且首点不超过车前 2 米，程序会沿首段方向把车道起点自动延至车辆后方 5 米；不再要求人工把首点画到车后 5 米。该自动延长段仍须现场核实可行驶；即使长度与规划器可能保留的车后轨迹相当，也不能据此判断轨迹完全在车道内。**已有地图不会自动修改**，更新 UI 进程后需重新绘制并在线生成/切换地图，再下发路线；不必为换图重启整个 Autoware。实车执行前仍需核验新车道边界和障碍物。
+
+## Costmap 与 HT 规划
+
+全局高程多帧积累、磁盘保存及局部裁剪输入 HT 的流程见
+[SCOUT_GLOBAL_ELEVATION.md](SCOUT_GLOBAL_ELEVATION.md)。同一个 Fix 原点重启会恢复已记录高程，
+不再每次清空；原点变化使用独立坐标会话。
+
+2026-10-26 更新后，Scout 默认 `publish_lane_driving_costmap:=true`，
+同一个原始 costmap 在车道场景也可发布，话题仍为
+`/planning/scenario_planning/parking/costmap_generator/occupancy_grid`。
+此开关同时启用 `publish_continuously=true`，启动后无需先下发路线或等待场景消息，
+只要地图、真实点云和车辆 TF 有效即可持续发布。
+名字含 `parking` 不表示现在必须切到泊车模式；输入或 TF 缺失/过期时仍会暂停更新。
+
+HT 对路径和速度的约束默认不启用。可选的 `scout_ht_enforce:=true`
+接入了停车插件与车道内采样路径筛选，说明和验证边界见
+[SCOUT_HT_PLANNING.md](SCOUT_HT_PLANNING.md)。本轮没有实车验收，
+不能把方向阈值、制动预算初值当作已经标定的实车参数。

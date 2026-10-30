@@ -14,6 +14,7 @@ if [[ ! -f "$ele_ws/install/local_setup.bash" ]]; then
   exit 1
 fi
 source "$repo_dir/setup_env.bash"
+export SCOUT_HT_MAP_ROOT="${SCOUT_HT_MAP_ROOT:-$(dirname -- "$repo_dir")/scout_elevation_maps}"
 source "$ele_ws/install/local_setup.bash"
 if [[ -f "$ele_ws/setup_runtime_env.sh" ]]; then
   source "$ele_ws/setup_runtime_env.sh"

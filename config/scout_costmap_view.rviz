@@ -1,0 +1,68 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Distance Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 100
+      Reference Frame: base_link
+      Alpha: 0.2
+    - Class: rviz_default_plugins/Map
+      Name: Perception Occupancy Grid
+      Enabled: true
+      Alpha: 1.0
+      Color Scheme: map
+      Topic:
+        Value: /perception/occupancy_grid_map/map
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        Depth: 1
+    - Class: rviz_default_plugins/Map
+      Name: Planning Costmap
+      Enabled: true
+      Alpha: 0.8
+      Color Scheme: map
+      Topic:
+        Value: /planning/scenario_planning/parking/costmap_generator/occupancy_grid
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        Depth: 1
+    - Class: rviz_default_plugins/Map
+      Name: HT Fused Costmap
+      Enabled: true
+      Alpha: 1.0
+      Color Scheme: map
+      Topic:
+        Value: /scout/traversability/fused_costmap
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        Depth: 1
+    - Class: rviz_default_plugins/Axes
+      Name: Vehicle Position
+      Enabled: true
+      Reference Frame: base_link
+      Length: 1
+      Radius: 0.05
+  Enabled: true
+  Global Options:
+    Fixed Frame: map
+    Background Color: 48; 48; 48
+    Frame Rate: 15
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Target Frame: base_link
+      Scale: 55
+      X: 0
+      Y: 0
+Window Geometry:
+  Width: 1200
+  Height: 850

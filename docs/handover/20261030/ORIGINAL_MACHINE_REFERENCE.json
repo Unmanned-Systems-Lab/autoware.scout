@@ -1,0 +1,68 @@
+{
+  "created_at": "2026-10-30T20:19:30.600458+08:00",
+  "purpose": "Original machine reference only; target machine needs its own build and compatible GPU libraries.",
+  "os_release": "PRETTY_NAME=\"Ubuntu 22.04.5 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"22.04\"\nVERSION=\"22.04.5 LTS (Jammy Jellyfish)\"\nVERSION_CODENAME=jammy\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=jammy\n",
+  "architecture": {
+    "exit_code": 0,
+    "output": "aarch64",
+    "stderr": ""
+  },
+  "l4t": "# R36 (release), REVISION: 5.0, GCID: 43688277, BOARD: generic, EABI: aarch64, DATE: Fri Jan 16 03:50:45 UTC 2026\n# KERNEL_VARIANT: oot\nTARGET_USERSPACE_LIB_DIR=nvidia\nTARGET_USERSPACE_LIB_DIR_PATH=usr/lib/aarch64-linux-gnu/nvidia\n",
+  "cuda_symlink": "/usr/local/cuda-12.6",
+  "nvcc": {
+    "exit_code": 0,
+    "output": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2024 NVIDIA Corporation\nBuilt on Wed_Aug_14_10:14:07_PDT_2024\nCuda compilation tools, release 12.6, V12.6.68\nBuild cuda_12.6.r12.6/compiler.34714021_0",
+    "stderr": ""
+  },
+  "gpu_deb_versions": {
+    "exit_code": 0,
+    "output": "cuda-toolkit-12-6-config-common 12.6.68-1\ncuda-toolkit-12-config-common 12.6.68-1\ncuda-toolkit-config-common 12.6.68-1\nlibnvinfer-dev 10.3.0.30-1+cuda12.5\nlibnvinfer-dispatch10 10.3.0.30-1+cuda12.5\nlibnvinfer-doc \nlibnvinfer-headers-dev 10.3.0.30-1+cuda12.5\nlibnvinfer-headers-plugin-dev 10.3.0.30-1+cuda12.5\nlibnvinfer-lean10 10.3.0.30-1+cuda12.5\nlibnvinfer-plugin-dev 10.3.0.30-1+cuda12.5\nlibnvinfer-plugin10 10.3.0.30-1+cuda12.5\nlibnvinfer-vc-plugin10 10.3.0.30-1+cuda12.5\nlibnvinfer10 10.3.0.30-1+cuda12.5",
+    "stderr": ""
+  },
+  "python_versions": {
+    "exit_code": 0,
+    "output": "{\"torch\": \"2.8.0\", \"cupy-cuda12x\": \"13.6.0\", \"numpy\": \"1.23.5\", \"scipy\": \"1.8.0\", \"shapely\": \"2.1.2\", \"simple-parsing\": \"0.1.9\"}",
+    "stderr": ""
+  },
+  "autoware_base_commit": {
+    "exit_code": 0,
+    "output": "65cf4e135230a844f1c555561c5b941be60a931d",
+    "stderr": ""
+  },
+  "ele_base_commit": {
+    "exit_code": 0,
+    "output": "a3b5c3bf4fe48d32311628be58da27efc3d85374",
+    "stderr": ""
+  },
+  "original_autoware_overlay_chain": "/mnt/nvme0n1/autoware/autoware.scout/install/setup.bash chains /opt/ros/humble and /mnt/nvme0n1/autoware/autoware.ez21/install",
+  "source_export_metadata": {
+    "created_at": "2026-10-30T17:00:12.754483+08:00",
+    "patch_check": "PASS",
+    "archives": [
+      {
+        "file": "/mnt/nvme0n1/autoware/exports/autoware.scout_source_20261030_165858.zip",
+        "zip_bytes": 445250962,
+        "source_bytes": 871843374,
+        "source_files": 16585,
+        "zip_entries": 16589,
+        "sha256": "c35477805897cb742f23916b07a7eb606a25404c81ed22faabb3244942957e25",
+        "crc_check": "PASS"
+      },
+      {
+        "file": "/mnt/nvme0n1/autoware/exports/ele_scouts_kit_source_20261030_165858.zip",
+        "zip_bytes": 21494217,
+        "source_bytes": 48094472,
+        "source_files": 765,
+        "zip_entries": 768,
+        "sha256": "e0864b82b84d99f3ceb74a67ac8f64b941193070a3bd089370bea2120b6b44c3",
+        "crc_check": "PASS"
+      }
+    ]
+  },
+  "document_validation": {
+    "bash_syntax_blocks_passed": 18,
+    "referenced_launch_scripts_and_rviz_configs": "PASS",
+    "target_machine_build": "NOT_RUN",
+    "no_drivers_started_for_document_validation": true
+  }
+}

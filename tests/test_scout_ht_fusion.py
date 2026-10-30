@@ -12,7 +12,7 @@ from std_msgs.msg import Float32MultiArray, MultiArrayDimension
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] /
                        "src/perception/scout_ht_traversability"))
 from scout_ht_traversability.core import (Geometry, Policy, Pose2, Reason, Terrain,
-                                          fresh, fuse, nearest_direction)
+                                          fresh, fuse, fuse_local_window, nearest_direction)
 from scout_ht_traversability.codec import costmap_geometry, decode_terrain
 
 
@@ -34,6 +34,8 @@ def ht_message(source, order="F", start=(0, 0), offset=0):
     layers["ht_valid"] = source.valid
     if source.direction_valid is not None:
         layers.update({f"ht_dir_valid_{k}": source.direction_valid[k] for k in range(8)})
+    if source.observed is not None:
+        layers["ht_observed"] = source.observed
     for name, matrix in layers.items():
         array = Float32MultiArray()
         if order == "F":
@@ -52,6 +54,93 @@ def ht_message(source, order="F", start=(0, 0), offset=0):
 
 
 class FusionTest(unittest.TestCase):
+    def test_optimistic_initial_map_is_free_including_outside_ht_and_robot_cell(self):
+        geometry = Geometry(81, 81, .1, Pose2(-4.05, -4.05))
+        base = np.zeros((81, 81), np.int8)
+        base[0, 0] = 100
+        base[0, 1] = -1
+        ht = terrain(probability=np.nan, shape=(20, 20))
+        ht.valid[:] = 0
+        ht.observed = np.zeros(ht.valid.shape, np.float32)
+        policy = Policy(unobserved_is_free=True)
+        result, reasons, _ = fuse_local_window(base, geometry, ht, (0, 0), policy)
+        self.assertTrue((result[base == 0] == 0).all())
+        self.assertTrue((reasons[base == 0] == Reason.PRIOR_FREE).all())
+        self.assertEqual(result[0, 0], 100)
+        self.assertEqual(result[0, 1], 100)
+
+    def test_optimistic_prior_does_not_clear_observed_low_invalid_or_partial_edge(self):
+        geometry = Geometry(1, 1, .2, Pose2(1.85, -.1))
+        ht = terrain()
+        ht.observed = np.zeros(ht.valid.shape, np.float32)
+        ht.observed[0, 19] = 1
+        policy = Policy(front_reference_offset=0., unobserved_is_free=True)
+        base = np.zeros((1, 1), np.int8)
+        ht.probabilities[0, 0, 19] = .01
+        result, reasons, _ = fuse(base, geometry, ht, (0, 0), policy)
+        self.assertEqual(result[0, 0], 100)
+        self.assertEqual(reasons[0, 0], Reason.HT_LOW)
+        ht.probabilities[0, 0, 19] = np.nan
+        self.assertEqual(fuse(base, geometry, ht, (0, 0), policy)[1][0, 0], Reason.HT_INVALID)
+        ht.valid[:] = 0  # No HT conclusion yet: retain the prior instead of inventing a block.
+        self.assertEqual(fuse(base, geometry, ht, (0, 0), policy)[1][0, 0], Reason.PRIOR_FREE)
+        ht.observed[:] = 0
+        self.assertEqual(fuse(base, geometry, ht, (0, 0), policy)[1][0, 0], Reason.PRIOR_FREE)
+
+    def test_optimistic_mode_requires_explicit_observation_mask(self):
+        with self.assertRaisesRegex(ValueError, "observation mask"):
+            fuse(np.zeros((1, 1), np.int8), Geometry(1, 1, .1), terrain(),
+                 (0, 0), Policy(unobserved_is_free=True))
+
+    def test_optimistic_window_matches_full_reference_with_rotations(self):
+        rng = np.random.default_rng(76)
+        for angle in (0., .4, -1.3):
+            geometry = Geometry(170, 150, .1, Pose2(-8, -7, angle))
+            base = rng.choice(np.array([-1, 0, 100], np.int8), (150, 170))
+            ht = terrain(shape=(31, 39))
+            ht.center = Pose2(.6, -.2, .3)
+            ht.observed = (rng.random(ht.valid.shape) > .7).astype(np.float32)
+            ht.probabilities[:] = rng.random(ht.probabilities.shape)
+            policy = Policy(unobserved_is_free=True)
+            transform = Pose2(.2, -.1, -.2)
+            expected = fuse(base, geometry, ht, (0, 0), policy, transform)
+            actual = fuse_local_window(base, geometry, ht, (0, 0), policy, transform)
+            np.testing.assert_array_equal(actual[0], expected[0])
+            np.testing.assert_array_equal(actual[1], expected[1])
+
+    def test_local_window_matches_reference_with_rotations_and_vetoes(self):
+        rng = np.random.default_rng(42)
+        for yaw in (0.0, 0.43, -1.7):
+            geometry = Geometry(213, 195, 0.1, Pose2(-10, -9, yaw))
+            base = rng.choice(np.array([-1, 0, 35, 100], dtype=np.int8),
+                              size=(geometry.height, geometry.width))
+            ht = terrain(shape=(37, 43))
+            ht.center = Pose2(0.7, -0.8, -yaw / 2)
+            ht.probabilities[:] = rng.uniform(0, 1, ht.probabilities.shape)
+            ht.valid[rng.random(ht.valid.shape) < 0.1] = 0
+            ht.probabilities[2, 15, 15] = np.nan
+            transform = Pose2(0.2, -0.4, yaw / 3)
+            for robot in ((0.0, 0.0), (8.1, -7.2), (100.0, 100.0)):
+                policy = Policy(near_robot_distance=0.25)
+                expected = fuse(base, geometry, ht, robot, policy, transform)
+                actual = fuse_local_window(base, geometry, ht, robot, policy, transform)
+                np.testing.assert_array_equal(actual[0], expected[0])
+                np.testing.assert_array_equal(actual[1], expected[1])
+                queried = actual[2] >= 0
+                np.testing.assert_array_equal(actual[2][queried], expected[2][queried])
+
+    def test_four_centimetre_full_map_preserves_extent_and_thin_obstacles(self):
+        geometry = Geometry(1750, 1750, 0.04, Pose2(-35, -35))
+        base = np.zeros((1750, 1750), dtype=np.int8)
+        base[:, 877] = 100
+        ht = terrain(shape=(200, 200), resolution=0.04)
+        result, reason, _ = fuse_local_window(base, geometry, ht, (0, 0))
+        self.assertEqual(result.shape, (1750, 1750))
+        self.assertTrue((result[:, 877] == 100).all())
+        self.assertTrue((reason[:, 877] == Reason.BASE_BLOCKED).all())
+        self.assertEqual(result[0, 0], 100)  # No HT support outside its local crop.
+        self.assertGreater(np.count_nonzero(result == 0), 0)
+
     def setUp(self):
         self.geometry = Geometry(1, 1, 0.1, Pose2(0.5, 0.0))
         self.base = np.array([[0]], dtype=np.int8)
@@ -218,6 +307,7 @@ class CodecTest(unittest.TestCase):
 
 
 class NodeTest(unittest.TestCase):
+    optimistic = False
     def setUp(self):
         import rclpy
         from rclpy.parameter import Parameter
@@ -229,6 +319,7 @@ class NodeTest(unittest.TestCase):
             Parameter("ht_topic", value="/scout_ht_test/ht"),
             Parameter("odometry_topic", value="/scout_ht_test/odom"),
             Parameter("output_topic", value="/scout_ht_test/fused"),
+            Parameter("unobserved_is_free", value=self.optimistic),
         ])
         class Recorder:
             def __init__(self):
@@ -246,7 +337,10 @@ class NodeTest(unittest.TestCase):
         self.base.info.origin.position.x = 0.5
         self.base.info.origin.orientation.w = 1.0
         self.base.data = [0]
-        self.ht = ht_message(terrain())
+        source = terrain()
+        if self.optimistic:
+            source.observed = np.zeros(source.valid.shape, np.float32)
+        self.ht = ht_message(source)
         from nav_msgs.msg import Odometry
         self.odom = Odometry()
         self.odom.header.frame_id = "map"
@@ -318,6 +412,24 @@ class NodeTest(unittest.TestCase):
         self.node.on_ht(self.ht)
         self.assertNotIn("ht", self.node.inputs)
 
+    def test_global_elevation_session_switch_rejects_cached_and_unavailable_data(self):
+        from std_msgs.msg import String
+        self.feed()
+        self.node.on_elevation_session(String(data="first-origin"))
+        self.assertEqual(self.node.inputs, {})
+        self.assertEqual(list(self.node.output.messages[-1].data), [100])
+        self.node.on_ht(self.ht)
+        self.assertNotIn("ht", self.node.inputs)
+        self.feed()
+        self.assertEqual(list(self.node.output.messages[-1].data), [0])
+        self.node.on_elevation_session(String(data="unavailable"))
+        self.feed()
+        self.assertEqual(list(self.node.output.messages[-1].data), [100])
+        self.assertEqual(self.node.diagnostics.messages[-1].status[0].message, "WAITING_ELEVATION_SESSION")
+        self.node.on_elevation_session(String(data="new-origin"))
+        self.feed()
+        self.assertEqual(list(self.node.output.messages[-1].data), [0])
+
     def test_stamp_skew_does_not_launder_old_observation(self):
         from rclpy.time import Time
         self.feed()
@@ -377,6 +489,26 @@ class NodeTest(unittest.TestCase):
                               "-r", "/scout_ht_test/fused:=/scout_ht_test/base"])
         finally:
             candidate.destroy_node()
+
+
+class OptimisticNodeTest(NodeTest):
+    optimistic = True
+
+    def test_real_low_scores_replace_prior_and_base_obstacles_always_veto(self):
+        self.feed()
+        self.assertEqual(list(self.node.output.messages[-1].data), [0])
+        metrics = {v.key: v.value for v in self.node.diagnostics.messages[-1].status[0].values}
+        self.assertEqual(metrics["prior_free_cells"], "1")
+        source = terrain(probability=.01)
+        source.observed = np.ones(source.valid.shape, np.float32)
+        self.ht = ht_message(source)
+        self.feed()
+        self.assertEqual(list(self.node.output.messages[-1].data), [100])
+        source.observed[:] = 0
+        self.ht = ht_message(source)
+        self.base.data = [100]
+        self.feed()
+        self.assertEqual(list(self.node.output.messages[-1].data), [100])
 
 
 if __name__ == "__main__":

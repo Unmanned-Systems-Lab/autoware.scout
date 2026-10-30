@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="generate_autoware_map.py">
+  <MetaInfo format_version="1" map_version="1"/>
+  <node id="1" lat="29.6003799798" lon="106.2853286048">
+    <tag k="local_x" v="-3.4097"/>
+    <tag k="local_y" v="21.4137"/>
+    <tag k="ele" v="0"/>
+  </node>
+  <node id="2" lat="29.6003157040" lon="106.2853661406">
+    <tag k="local_x" v="0.2264"/>
+    <tag k="local_y" v="14.289"/>
+    <tag k="ele" v="0"/>
+  </node>
+  <node id="3" lat="29.6003834648" lon="106.2853364186">
+    <tag k="local_x" v="-2.6528"/>
+    <tag k="local_y" v="21.8"/>
+    <tag k="ele" v="0"/>
+  </node>
+  <node id="4" lat="29.6003191890" lon="106.2853739543">
+    <tag k="local_x" v="0.9833"/>
+    <tag k="local_y" v="14.6753"/>
+    <tag k="ele" v="0"/>
+  </node>
+  <node id="5" lat="29.6003764948" lon="106.2853207911">
+    <tag k="local_x" v="-4.1666"/>
+    <tag k="local_y" v="21.0274"/>
+    <tag k="ele" v="0"/>
+  </node>
+  <node id="6" lat="29.6003122190" lon="106.2853583269">
+    <tag k="local_x" v="-0.5305"/>
+    <tag k="local_y" v="13.9027"/>
+    <tag k="ele" v="0"/>
+  </node>
+  <way id="7">
+    <nd ref="1"/>
+    <nd ref="2"/>
+  </way>
+  <way id="8">
+    <nd ref="3"/>
+    <nd ref="4"/>
+    <tag k="type" v="line_thin"/>
+    <tag k="subtype" v="solid"/>
+  </way>
+  <way id="9">
+    <nd ref="5"/>
+    <nd ref="6"/>
+    <tag k="type" v="line_thin"/>
+    <tag k="subtype" v="solid"/>
+  </way>
+  <relation id="10">
+    <member type="way" role="left" ref="8"/>
+    <member type="way" role="right" ref="9"/>
+    <member type="way" role="centerline" ref="7"/>
+    <tag k="type" v="lanelet"/>
+    <tag k="subtype" v="road"/>
+    <tag k="speed_limit" v="10"/>
+    <tag k="location" v="urban"/>
+    <tag k="one_way" v="yes"/>
+  </relation>
+</osm>

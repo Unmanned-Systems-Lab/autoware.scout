@@ -1,0 +1,3 @@
+<library path="scout_ht_velocity_module">
+  <class type="scout_ht_planning::VelocityModule" base_class_type="autoware::motion_velocity_planner::PluginModuleInterface"/>
+</library>

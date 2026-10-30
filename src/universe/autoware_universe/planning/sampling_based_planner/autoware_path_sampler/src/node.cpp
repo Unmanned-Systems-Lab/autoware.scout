@@ -67,6 +67,9 @@ PathSampler::PathSampler(const rclcpp::NodeOptions & node_options)
   time_keeper_ptr_(std::make_shared<TimeKeeper>())
 {
   // interface publisher
+  if (declare_parameter<bool>("scout_ht.enabled", false)) {
+    ht_guard_ = std::make_unique<scout_ht_planning::CostmapGuard>(*this);
+  }
   traj_pub_ = create_publisher<Trajectory>("~/output/path", 1);
   virtual_wall_pub_ = create_publisher<MarkerArray>("~/virtual_wall", 1);
 
@@ -127,6 +130,7 @@ PathSampler::PathSampler(const rclcpp::NodeOptions & node_options)
     params_.constraints.ego_footprint = vehicle_info_.createFootprint();
     params_.constraints.ego_width = vehicle_info_.vehicle_width_m;
     params_.constraints.ego_length = vehicle_info_.vehicle_length_m;
+    if (ht_guard_) params_.constraints.hard.limit_footprint_inside_drivable_area = true;
 
     // parameter for debug info
     time_keeper_ptr_->enable_calculation_time_info =
@@ -148,6 +152,17 @@ rcl_interfaces::msg::SetParametersResult PathSampler::onParam(
   const std::vector<rclcpp::Parameter> & parameters)
 {
   using autoware_utils::update_param;
+
+  for (const auto & p : parameters) {
+    if (
+      p.get_name().rfind("scout_ht.", 0) == 0 ||
+      (ht_guard_ && p.get_name() == "constraints.hard.limit_footprint_inside_drivable_area")) {
+      rcl_interfaces::msg::SetParametersResult result;
+      result.successful = false;
+      result.reason = "HT planning and lane constraints are startup-only";
+      return result;
+    }
+  }
 
   update_param(
     parameters, "constraints.hard.max_curvature", params_.constraints.hard.max_curvature);
@@ -252,8 +267,32 @@ void PathSampler::onPath(const Path::SharedPtr path_ptr)
   }
   // 1. create planner data
   const auto planner_data = createPlannerData(*path_ptr, *ego_state_ptr);
+  if (ht_guard_) {
+    // Freeze one map for the complete candidate solve, including reused paths.
+    ht_snapshot_ = ht_guard_->snapshot(path_ptr->header.frame_id);
+    const double speed = std::abs(planner_data.ego_vel);
+    const double map_age =
+      ht_snapshot_.grid
+        ? std::max(0.0, now().seconds() - rclcpp::Time(ht_snapshot_.grid->header.stamp).seconds())
+        : 0.0;
+    ht_check_distance_ = std::max(
+      ht_guard_->minimum_lookahead, speed * (ht_guard_->latency + map_age) +
+                                      speed * speed / (2 * ht_guard_->deceleration) +
+                                      ht_guard_->stop_margin);
+    const double age = now().seconds() - rclcpp::Time(ego_state_ptr->header.stamp).seconds();
+    if (
+      !autoware::motion_utils::isDrivingForward(path_ptr->points) ||
+      ego_state_ptr->header.frame_id != "map" || ego_state_ptr->child_frame_id != "base_link" ||
+      !std::isfinite(speed) || age < -0.05 || age > 0.5) {
+      ht_snapshot_ = {nullptr, "INVALID_EGO_OR_REVERSE"};
+    }
+  }
   // 2. generate trajectory
-  const auto generated_traj_points = generateTrajectory(planner_data);
+  auto generated_traj_points = generateTrajectory(planner_data);
+  if (ht_guard_ && !ht_guard_->current(ht_snapshot_)) {
+    generated_traj_points.clear();
+    resetPreviousData();
+  }
   // 3. extend trajectory to connect the optimized trajectory and the following path smoothly
   if (!generated_traj_points.empty()) {
     const auto output_traj_msg =
@@ -450,9 +489,22 @@ autoware::sampler_common::Path PathSampler::generatePath(const PlannerData & pla
   time_keeper_ptr_->tic(__func__);
   autoware::sampler_common::Path generated_path{};
 
+  if (ht_guard_) {
+    const auto objects = objects_sub_.take_data();
+    if (!objects || !ht_snapshot_.grid) {
+      resetPreviousData();
+      time_keeper_ptr_->toc(__func__, "    ");
+      return generated_path;
+    }
+    // A directly reused path must satisfy this cycle's lane/object constraints,
+    // not the constraints retained from the last candidate-generation cycle.
+    prepareConstraints(
+      params_.constraints, *objects, planner_data.left_bound, planner_data.right_bound);
+  }
+
   if (prev_path_ && prev_path_->points.size() > 1) {
     autoware::sampler_common::constraints::checkHardConstraints(*prev_path_, params_.constraints);
-    if (prev_path_->constraint_results.isValid()) {
+    if (prev_path_->constraint_results.isValid() && htPathClear(*prev_path_, planner_data)) {
       const auto prev_path_spline =
         preparePathSpline(trajectory_utils::convertToTrajectoryPoints(*prev_path_), false);
       const auto frenet_p = prev_path_spline.frenet(
@@ -485,6 +537,7 @@ autoware::sampler_common::Path PathSampler::generatePath(const PlannerData & pla
   for (auto & path : candidate_paths) {
     const auto footprint =
       autoware::sampler_common::constraints::checkHardConstraints(path, params_.constraints);
+    if (!htPathClear(path, planner_data)) path.constraint_results.collision_free = false;
     debug_data_.footprints.push_back(footprint);
     autoware::sampler_common::constraints::calculateCost(path, params_.constraints, path_spline);
   }
@@ -516,7 +569,7 @@ autoware::sampler_common::Path PathSampler::generatePath(const PlannerData & pla
       k += static_cast<int>(!p.constraint_results.valid_curvature);
     }
     RCLCPP_WARN(get_logger(), "\tInvalid coll/da/k = %d/%d/%d\n", coll, da, k);
-    if (prev_path_) generated_path = *prev_path_;
+    if (prev_path_ && htPathClear(*prev_path_, planner_data)) generated_path = *prev_path_;
   }
   time_keeper_ptr_->toc(__func__, "    ");
   debug_data_.previous_sampled_candidates_nb = debug_data_.sampled_candidates.size();
@@ -525,6 +578,38 @@ autoware::sampler_common::Path PathSampler::generatePath(const PlannerData & pla
 
   prev_path_ = generated_path;
   return generated_path;
+}
+
+bool PathSampler::htPathClear(
+  const autoware::sampler_common::Path & path, const PlannerData & data) const
+{
+  if (!ht_guard_) return true;
+  if (!ht_snapshot_.grid || path.points.empty() || path.yaws.size() != path.points.size())
+    return false;
+  try {
+    const auto ego = scout_ht_planning::planar_pose(data.ego_pose);
+    // Reused candidates can contain points behind ego. Only the executable
+    // suffix is tested, always including a sweep from the actual ego pose.
+    size_t nearest = 0;
+    double best = std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i < path.points.size(); ++i) {
+      const double d = std::hypot(path.points[i].x() - ego.x, path.points[i].y() - ego.y);
+      if (d < best) {
+        best = d;
+        nearest = i;
+      }
+    }
+    std::vector<scout_ht_planning::Pose2> poses{ego};
+    for (size_t i = nearest; i < path.points.size(); ++i)
+      poses.push_back({path.points[i].x(), path.points[i].y(), path.yaws[i]});
+    const scout_ht_planning::Footprint footprint{
+      vehicle_info_.max_longitudinal_offset_m, vehicle_info_.min_longitudinal_offset_m,
+      vehicle_info_.max_lateral_offset_m, vehicle_info_.min_lateral_offset_m};
+    return !scout_ht_planning::check_path(*ht_snapshot_.grid, poses, footprint, ht_check_distance_)
+              .blocked;
+  } catch (const std::exception &) {
+    return false;
+  }
 }
 
 std::vector<TrajectoryPoint> PathSampler::generateTrajectoryPoints(const PlannerData & planner_data)

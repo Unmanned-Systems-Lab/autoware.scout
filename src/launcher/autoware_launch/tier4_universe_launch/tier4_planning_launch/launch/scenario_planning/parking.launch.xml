@@ -2,9 +2,12 @@
   <arg name="input_objects_topic_name" default="/perception/object_recognition/objects"/>
   <arg name="input_pointcloud_topic_name" default="/perception/obstacle_segmentation/pointcloud"/>
   <arg name="input_route_topic_name" default="/planning/mission_planning/route"/>
+  <arg name="launch_scout_ht_module" default="false"/>
+  <arg name="publish_lane_driving_costmap" default="false"/>
+  <let name="publish_lane_driving_costmap" value="true" if="$(var launch_scout_ht_module)"/>
 
   <!-- parking scenario -->
-  <group if="$(var launch_parking_module)">
+  <group if="$(eval &quot;'$(var launch_parking_module)'.lower() == 'true' or '$(var publish_lane_driving_costmap)'.lower() == 'true'&quot;)">
     <push-ros-namespace namespace="parking"/>
 
     <node_container pkg="rclcpp_components" exec="$(var container_type)" name="parking_container" namespace="" output="screen">
@@ -19,10 +22,12 @@
         <!-- params -->
         <param from="$(var vehicle_param_file)"/>
         <param from="$(var costmap_generator_param_path)"/>
+        <param name="activate_in_lane_driving" value="$(var publish_lane_driving_costmap)"/>
+        <param name="publish_continuously" value="$(var publish_lane_driving_costmap)"/>
         <extra_arg name="use_intra_process_comms" value="false"/>
       </composable_node>
 
-      <composable_node pkg="autoware_freespace_planner" plugin="autoware::freespace_planner::FreespacePlannerNode" name="freespace_planner" namespace="">
+      <composable_node pkg="autoware_freespace_planner" plugin="autoware::freespace_planner::FreespacePlannerNode" name="freespace_planner" namespace="" if="$(var launch_parking_module)">
         <!-- topic remap -->
         <remap from="~/input/route" to="$(var input_route_topic_name)"/>
         <remap from="~/input/scenario" to="/planning/scenario_planning/scenario"/>
@@ -35,7 +40,6 @@
         <param from="$(var freespace_planner_param_path)"/>
         <extra_arg name="use_intra_process_comms" value="false"/>
       </composable_node>
-
       <composable_node pkg="autoware_glog_component" plugin="autoware::glog_component::GlogComponent" name="glog_component" namespace=""/>
     </node_container>
   </group>

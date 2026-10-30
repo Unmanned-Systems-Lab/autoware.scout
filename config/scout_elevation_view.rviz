@@ -1,0 +1,69 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: grid_map_rviz_plugin/GridMap
+      Name: Global Elevation + Initial Prior -1 m (15 m)
+      Enabled: true
+      Value: true
+      Alpha: 1
+      Height Layer: elevation
+      Height Transformer: GridMapLayer
+      Color Layer: elevation
+      Color Transformer: IntensityLayer
+      Color: 200; 200; 200
+      Autocompute Intensity Bounds: true
+      Min Intensity: -2
+      Max Intensity: 2
+      Min Color: 0; 0; 0
+      Max Color: 255; 255; 255
+      Use Rainbow: true
+      Invert Rainbow: false
+      History Length: 1
+      Show Grid Lines: false
+      Topic:
+        Value: /elevation_mapping_node/elevation_map_global
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        Depth: 1
+    - Class: rviz_default_plugins/MarkerArray
+      Name: All Accumulated Elevation Tiles
+      Enabled: false
+      Topic:
+        Value: /elevation_mapping_node/elevation_map_global_tiles
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        Depth: 1
+    - Class: rviz_default_plugins/Axes
+      Name: Vehicle Position
+      Enabled: true
+      Reference Frame: base_link
+      Length: 1
+      Radius: 0.05
+  Enabled: true
+  Global Options:
+    Fixed Frame: map
+    Background Color: 48; 48; 48
+    Frame Rate: 10
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Target Frame: base_link
+      Distance: 18
+      Pitch: 0.8
+      Yaw: 0.8
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+Window Geometry:
+  X: 70
+  Y: 565
+  Width: 1850
+  Height: 470

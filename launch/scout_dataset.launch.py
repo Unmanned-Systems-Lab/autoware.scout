@@ -1,10 +1,12 @@
 """Only the Scout data-collection drivers; no Autoware planning or control."""
 
 import os
+import sys
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
@@ -16,15 +18,18 @@ def generate_launch_description():
     vehicle_share = get_package_share_directory('scout_vehicle_description')
     zed_share = get_package_share_directory('zed_wrapper')
     zed_config = os.environ['SCOUT_DATASET_ZED_CONFIG']
+    repository = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     return LaunchDescription([
         DeclareLaunchArgument('can_interface', default_value='can10'),
+        DeclareLaunchArgument('start_lidar', default_value='true'),
         Node(
             package='scout_base', executable='scout_base_node',
             name='scout_base', output='screen',
             parameters=[{
                 'port_name': LaunchConfiguration('can_interface'),
                 'auto_reconnect': False,
+                'read_only': True,
                 'odom_frame': 'scout_wheel_odom',
                 'base_frame': 'scout_chassis_link',
                 'odom_topic_name': '/scout/wheel_odometry',
@@ -32,8 +37,16 @@ def generate_launch_description():
             remappings=[
                 ('/cmd_vel', '/scout/cmd_vel'),
                 ('/scout_status', '/scout/status'),
+                ('/scout_rc_state', '/scout/rc_state'),
                 ('/tf', '/scout/wheel_tf'),
             ],
+        ),
+        ExecuteProcess(
+            cmd=[sys.executable,
+                 os.path.join(repository, 'scripts', 'scout_rc_command_estimator.py'),
+                 '--ros-args', '--params-file',
+                 os.path.join(repository, 'config', 'scout_rc_command.yaml')],
+            output='screen',
         ),
         Node(
             package='fixposition_driver_ros2', executable='fixposition_driver_ros2_exec',
@@ -49,6 +62,7 @@ def generate_launch_description():
         Node(
             package='rslidar_sdk', executable='rslidar_sdk_node',
             output='screen',
+            condition=IfCondition(LaunchConfiguration('start_lidar')),
             parameters=[{'config_path': os.path.join(sensor_share, 'config', 'rslidar.yaml')}],
             remappings=[('param_handle:__node', 'rslidar_sdk')],
         ),
@@ -78,6 +92,7 @@ def generate_launch_description():
                 'ros_params_override_path': zed_config,
                 'publish_tf': 'false',
                 'publish_map_tf': 'false',
+                'publish_imu_tf': 'true',
             }.items(),
         ),
     ])

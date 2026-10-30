@@ -8,6 +8,7 @@ from autoware_map_msgs.msg import MapProjectorInfo
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from grid_map_msgs.msg import GridMap
 from nav_msgs.msg import OccupancyGrid, Odometry
+from std_msgs.msg import String
 import numpy as np
 import rclpy
 from rcl_interfaces.msg import SetParametersResult
@@ -18,7 +19,7 @@ from rclpy.time import Time
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from .codec import costmap_geometry, decode_terrain, planar_pose
-from .core import Policy, Pose2, Reason, fresh, fuse
+from .core import Policy, Pose2, Reason, fresh, fuse_local_window
 
 
 def seconds(stamp):
@@ -32,10 +33,12 @@ class FusionNode(Node):
             "base_costmap_topic": "/planning/scenario_planning/parking/costmap_generator/occupancy_grid",
             "ht_topic": "/scout/ht/raw",
             "odometry_topic": "/localization/kinematic_state",
+            "robot_frame": "",
             "output_topic": "/scout/traversability/fused_costmap",
             "obstacle_threshold": 100, "ht_threshold": 0.15,
             "heading_offset": 0.0, "front_reference_offset": 0.4825,
             "near_robot_distance": 0.05, "channel_order": list(range(8)),
+            "unobserved_is_free": False,
             "base_timeout": 1.0, "ht_timeout": 1.0, "odometry_timeout": 0.5,
             "max_stamp_skew": 0.75, "update_rate": 5.0,
         }
@@ -45,7 +48,7 @@ class FusionNode(Node):
         c = self.config
         self.policy = Policy(c["obstacle_threshold"], c["ht_threshold"], c["heading_offset"],
                              c["front_reference_offset"], c["near_robot_distance"],
-                             tuple(c["channel_order"]))
+                             tuple(c["channel_order"]), c["unobserved_is_free"])
         for key in ("base_timeout", "ht_timeout", "odometry_timeout", "max_stamp_skew", "update_rate"):
             if not math.isfinite(c[key]) or c[key] <= 0:
                 raise ValueError(key + " must be finite and positive")
@@ -54,10 +57,14 @@ class FusionNode(Node):
         for key in ("base_costmap_topic", "ht_topic", "odometry_topic", "output_topic"):
             if not c[key].startswith("/"):
                 raise ValueError(key + " must be an absolute topic")
+        if c["robot_frame"].startswith("/"):
+            raise ValueError("robot_frame must be a relative TF frame name")
+        self.required_inputs = ("base", "ht") if c["robot_frame"] else ("base", "ht", "odometry")
         self.inputs = {}
         self.last_base = None
         self.errors = {}
         self.projector = None
+        self.elevation_session = None
         self.epoch_stamp = 0.0
         self.last_time = None
         self.tf = Buffer(cache_time=Duration(seconds=10))
@@ -74,10 +81,14 @@ class FusionNode(Node):
         self.subscriptions_ = [
             self.create_subscription(OccupancyGrid, c["base_costmap_topic"], self.on_base, sensor_qos),
             self.create_subscription(GridMap, c["ht_topic"], self.on_ht, sensor_qos),
-            self.create_subscription(Odometry, c["odometry_topic"], self.on_odom, sensor_qos),
             self.create_subscription(MapProjectorInfo, "/map/map_projector_info", self.on_projector,
                                      QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)),
+            self.create_subscription(String, "/scout/elevation/session", self.on_elevation_session,
+                                     QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)),
         ]
+        if not c["robot_frame"]:
+            self.subscriptions_.append(self.create_subscription(
+                Odometry, c["odometry_topic"], self.on_odom, sensor_qos))
         # Geometry, channel meaning and source topics form one snapshot contract.
         self.add_on_set_parameters_callback(lambda params: SetParametersResult(
             successful=False, reason="Fusion parameters are startup-only; restart this node"))
@@ -119,6 +130,15 @@ class FusionNode(Node):
             self.get_logger().warn("Map projection changed; discarding all cached inputs")
         self.projector = message
 
+    def on_elevation_session(self, message):
+        if message.data != self.elevation_session:
+            self.elevation_session = message.data
+            self.inputs.clear()
+            self.errors.clear()
+            self.epoch_stamp = self.get_clock().now().nanoseconds * 1e-9
+            self.get_logger().warn("Global elevation session changed; waiting for new observations")
+            self.tick()
+
     def transform(self, target, source, stamp):
         if target == source:
             return Pose2()
@@ -136,7 +156,9 @@ class FusionNode(Node):
         self.last_time = current
         started = time.monotonic()
         state, code = "READY", Reason.PASS
-        for key in ("base", "ht", "odometry"):
+        if self.elevation_session == "unavailable":
+            state, code = "WAITING_ELEVATION_SESSION", Reason.WAITING
+        for key in self.required_inputs if code == Reason.PASS else ():
             if key in self.errors:
                 state, code = f"INVALID_{key.upper()}: {self.errors[key]}", Reason.INVALID_INPUT
                 break
@@ -149,7 +171,7 @@ class FusionNode(Node):
                 state, code = "STALE_" + key.upper(), Reason.STALE
                 break
         if code == Reason.PASS:
-            stamps = [seconds(self.inputs[k][0].header.stamp) for k in ("base", "ht", "odometry")]
+            stamps = [seconds(self.inputs[k][0].header.stamp) for k in self.required_inputs]
             if max(stamps) - min(stamps) > self.config["max_stamp_skew"]:
                 state, code = "STAMP_SKEW", Reason.STALE
         # Keep only the last valid geometry for publishing an all-black invalid
@@ -160,13 +182,18 @@ class FusionNode(Node):
             if code == Reason.PASS:
                 try:
                     ht_msg, ht, _ = self.inputs["ht"]
-                    odom, robot, _ = self.inputs["odometry"]
-                    robot = self.transform(base.header.frame_id, odom.header.frame_id,
-                                           odom.header.stamp).apply(*robot)
+                    if self.config["robot_frame"]:
+                        robot = self.transform(base.header.frame_id, self.config["robot_frame"],
+                                               base.header.stamp).apply(0.0, 0.0)
+                    else:
+                        odom, robot, _ = self.inputs["odometry"]
+                        robot = self.transform(base.header.frame_id, odom.header.frame_id,
+                                               odom.header.stamp).apply(*robot)
                     tf = self.transform(ht_msg.header.frame_id, base.header.frame_id,
                                         ht_msg.header.stamp)
                     values = np.asarray(base.data, dtype=np.int16).reshape(geometry.height, geometry.width)
-                    result, reasons, selected = fuse(values, geometry, ht, robot, self.policy, tf)
+                    result, reasons, selected = fuse_local_window(
+                        values, geometry, ht, robot, self.policy, tf)
                 except TransformException as error:
                     state, code = "TF_ERROR: " + str(error), Reason.TF_ERROR
                 except (ValueError, TypeError, OverflowError) as error:
@@ -184,11 +211,15 @@ class FusionNode(Node):
             output.info = deepcopy(base.info)
             for pub, data in ((self.output, result), (self.reasons, reasons),
                               (self.directions, selected)):
-                output.data = array("b", data.ravel().tolist())
+                payload = array("b")
+                payload.frombytes(np.ascontiguousarray(data, dtype=np.int8).tobytes())
+                output.data = payload
                 pub.publish(output)
             passed = int(np.count_nonzero(result == 0))
+            prior_free = int(np.count_nonzero(reasons == Reason.PRIOR_FREE))
         else:
             passed = 0
+            prior_free = 0
         status = DiagnosticStatus()
         status.name = "scout_ht_traversability/fusion"
         status.hardware_id = "observation_only"
@@ -196,6 +227,8 @@ class FusionNode(Node):
         status.message = state
         metrics = {"mode": "observe", "base_topic": self.config["base_costmap_topic"],
                    "obstacle_threshold": self.policy.obstacle_threshold,
+                   "unobserved_is_free": self.policy.unobserved_is_free,
+                   "prior_free_cells": prior_free,
                    "white_cells": passed, "compute_ms": round((time.monotonic() - started) * 1000, 3)}
         for key, (message, _, _) in self.inputs.items():
             metrics[key + "_age_s"] = round(current - seconds(message.header.stamp), 3)

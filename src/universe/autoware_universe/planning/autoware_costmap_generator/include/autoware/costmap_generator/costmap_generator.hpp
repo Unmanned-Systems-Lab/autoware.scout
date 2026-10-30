@@ -150,6 +150,12 @@ private:
   void onTimer();
 
   bool isActive();
+  bool inputsFresh() const;
+  bool strictInputTime() const
+  {
+    return param_->activate_in_lane_driving || param_->publish_continuously ||
+           param_->publish_in_vehicle_frame;
+  }
 
   /// \brief initialize gridmap parameters based on rosparam
   void initGridmap();

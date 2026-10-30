@@ -6,6 +6,8 @@ scout_costmap_ht_fusion:
     output_topic: /scout/traversability/fused_costmap
     # Matches the current freespace planner, NOT all other costmap consumers.
     obstacle_threshold: 100
+    # Unobserved/out-of-HT-coverage cells inherit a free prior; base obstacles still veto.
+    unobserved_is_free: true
     # ELE's existing diagnostic threshold; not a field-calibrated execution limit.
     ht_threshold: 0.15
     channel_order: [0, 1, 2, 3, 4, 5, 6, 7]

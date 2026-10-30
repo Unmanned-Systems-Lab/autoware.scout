@@ -7,7 +7,7 @@
     activate_by_scenario: True
     grid_min_value: 0.0
     grid_max_value: 1.0
-    grid_resolution: 0.3
+    grid_resolution: 0.04
     grid_length_x: 70.0
     grid_length_y: 70.0
     grid_position_x: 0.0
@@ -19,4 +19,5 @@
     use_objects: false
     use_points: true
     expand_polygon_size: 0.5
-    size_of_expansion_kernel: 9
+    # Preserve the old 1.2 m kernel half-width: (9 - 1) / 2 * 0.3 m.
+    size_of_expansion_kernel: 61

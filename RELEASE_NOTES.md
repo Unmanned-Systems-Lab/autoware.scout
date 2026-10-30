@@ -1,5 +1,9 @@
 # Scout Release Notes
 
+## 2026-10-30 source handover
+
+The current ELE handover is published at `CQULzz/eletranskit_scout`, commit `5163982d0faef28e84c9b00dc9d7367707175871`. `repositories/scout-external.repos` now pins it. Both repositories use the `handover/20261030-source` branch. See [中文启动速查](SCOUT_QUICKSTART_CN.md). The older repository plan below is retained as history.
+
 ## ELE Publication Target Update (2026-10-23)
 
 The user selected a new independent repository under `multimeters` instead of

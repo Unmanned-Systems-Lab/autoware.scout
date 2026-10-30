@@ -16,6 +16,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <limits>
 #include <string>
 
 namespace autoware::costmap_generator
@@ -220,5 +222,49 @@ TEST_F(PointsToCostmapTest, TestMakeCostmapFromPoints_invalidPoints_outOfGrid)
   }
 
   EXPECT_EQ(nonempty_grid_cell_num, 0);
+}
+TEST_F(PointsToCostmapTest, FourCentimetreMapMatchesLegacyRasterization)
+{
+  auto gridmap = construct_gridmap();
+  gridmap.setGeometry(grid_map::Length(70.0, 70.0), 0.04);
+  gridmap["points"].setZero();
+  pointcloud points;
+  points.push_back(pcl::PointXYZ(0.7F, 1.0F, 1.0F));
+  points.push_back(pcl::PointXYZ(0.7F, 1.0F, 4.0F));
+  points.push_back(pcl::PointXYZ(-1.4F, 2.0F, 0.5F));
+  PointsToCostmap converter;
+  const auto actual = converter.makeCostmapFromPoints(2.0, 0.0, 0.0, 1.0, gridmap, "points", points);
+  EXPECT_EQ(actual.rows(), 1750);
+  EXPECT_EQ(actual.cols(), 1750);
+  EXPECT_EQ((actual.array() == 1.0).count(), 2);
+  // Compare against the original algorithm on a small grid to exercise cell semantics.
+  gridmap.setGeometry(grid_map::Length(8.0, 8.0), 0.04);
+  gridmap["points"].setConstant(0.3);
+  points.push_back(pcl::PointXYZ(2.0F, 2.0F, 4.0F));
+  const auto small = converter.makeCostmapFromPoints(2.0, 0.0, 0.0, 1.0, gridmap, "points", points);
+  grid_map::Matrix reference = grid_map::Matrix::Zero(200, 200);
+  for (const auto & point : points) {
+    const int x = std::ceil((4.0 - point.x) / 0.04);
+    const int y = std::ceil((4.0 - point.y) / 0.04);
+    if (reference(x, y) == 0.0) reference(x, y) = 0.3F;
+    if (point.z <= 2.0 && point.z >= 0.0) reference(x, y) = 1.0F;
+  }
+  EXPECT_TRUE(small.isApprox(reference));
+}
+
+TEST_F(PointsToCostmapTest, ExcludedHeightsRetainPreviousAndEmptyCellsClear)
+{
+  auto gridmap = construct_gridmap();
+  gridmap["points"].setOnes();
+  pointcloud points;
+  points.push_back(pcl::PointXYZ(0.7F, 1.0F, 4.0F));
+  PointsToCostmap converter;
+  const auto retained = converter.makeCostmapFromPoints(2.0, 0.0, 0.0, 1.0, gridmap, "points", points);
+  EXPECT_EQ((retained.array() == 1.0).count(), 1);
+  points.clear();
+  points.push_back(pcl::PointXYZ(std::numeric_limits<float>::quiet_NaN(), 0.0F, 1.0F));
+  points.push_back(pcl::PointXYZ(std::numeric_limits<float>::max(), 0.0F, 1.0F));
+  const auto cleared = converter.makeCostmapFromPoints(2.0, 0.0, 0.0, 1.0, gridmap, "points", points);
+  EXPECT_EQ((cleared.array() != 0.0).count(), 0);
 }
 }  // namespace autoware::costmap_generator

@@ -4,6 +4,8 @@ Autoware Humble source snapshot adapted from EZ21 for AgileX Scout, using the
 local ELE Scout vehicle assembly, RoboSense RSHELIOS and Fixposition interfaces.
 The original verified EZ21 workspace is not modified.
 
+For this handover, start with [中文启动速查](SCOUT_QUICKSTART_CN.md) and the [original handover manual](docs/handover/20261030/SCOUT_HANDOVER.md).
+
 ## Build
 
 ```bash
@@ -25,9 +27,9 @@ Build outputs, downloaded dependencies and maps are not committed.
 ### Separate ELE Scout Dependency
 
 ELE Scout is maintained in its own repository, not copied into Autoware:
-`git@github.com:multimeters/ele_scouts_kit.git`.
+`git@github.com:CQULzz/eletranskit_scout.git`.
 `repositories/scout-external.repos` pins its matching source commit. Once that
-commit is published and accessible, import into a sibling workspace, not `src`:
+commit is accessible to your GitHub account, import into a sibling workspace, not `src`:
 
 ```bash
 mkdir -p ../scout_dependencies
@@ -61,6 +63,9 @@ For the local launch command and UI address, see [SCOUT_STARTUP.md](SCOUT_STARTU
 For release branches, tags and validation limits, see [RELEASE_NOTES.md](RELEASE_NOTES.md).
 The optional, observation-only costmap/HT fusion is described in
 [SCOUT_HT_STARTUP.md](SCOUT_HT_STARTUP.md); it does not replace planner inputs.
+Optional native stopping and sampled lane-path consumption are described in
+[SCOUT_HT_PLANNING.md](SCOUT_HT_PLANNING.md). Scout now also enables the existing
+costmap publisher in lane driving; terrain planning remains opt-in and is not field validated.
 
 Standalone Scout UI (local browser only; does not start Autoware, sensors, or chassis):
 

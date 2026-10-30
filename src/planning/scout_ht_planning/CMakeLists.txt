@@ -1,0 +1,18 @@
+cmake_minimum_required(VERSION 3.14)
+project(scout_ht_planning)
+find_package(autoware_cmake REQUIRED)
+autoware_package()
+
+ament_auto_add_library(${PROJECT_NAME} SHARED src/costmap.cpp src/guard.cpp)
+ament_auto_add_library(scout_ht_velocity_module SHARED src/velocity_module.cpp)
+target_link_libraries(scout_ht_velocity_module ${PROJECT_NAME})
+pluginlib_export_plugin_description_file(autoware_motion_velocity_planner plugins.xml)
+
+if(BUILD_TESTING)
+  ament_add_gtest(test_scout_ht_costmap test/test_costmap.cpp)
+  target_link_libraries(test_scout_ht_costmap ${PROJECT_NAME})
+  ament_add_gtest(test_scout_ht_velocity test/test_velocity.cpp)
+  target_link_libraries(test_scout_ht_velocity scout_ht_velocity_module)
+  target_compile_definitions(test_scout_ht_velocity PRIVATE SCOUT_WS_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/../../..")
+endif()
+ament_auto_package()

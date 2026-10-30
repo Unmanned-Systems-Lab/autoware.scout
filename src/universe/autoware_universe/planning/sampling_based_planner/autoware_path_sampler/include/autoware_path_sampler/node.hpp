@@ -24,6 +24,7 @@
 
 #include <autoware_sampler_common/structures.hpp>
 #include <autoware_utils/ros/polling_subscriber.hpp>
+#include <scout_ht_planning/guard.hpp>
 
 #include <algorithm>
 #include <memory>
@@ -49,6 +50,10 @@ protected:  // for the static_centerline_generator package
   EgoNearestParam ego_nearest_param_{};
   Parameters params_;
   size_t debug_id_ = 0;
+  std::unique_ptr<scout_ht_planning::CostmapGuard> ht_guard_;
+  scout_ht_planning::Snapshot ht_snapshot_;
+  double ht_check_distance_{};
+  bool htPathClear(const autoware::sampler_common::Path & path, const PlannerData & data) const;
 
   // variables for subscribers
   Odometry::SharedPtr ego_state_ptr_;

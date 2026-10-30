@@ -5,6 +5,22 @@ costmap_generator_node:
   activate_by_scenario:
     type: bool
     description: If true, activate by scenario = parking. Otherwise, activate if vehicle is inside parking lot.
+  activate_in_lane_driving:
+    type: bool
+    default_value: false
+    description: Also publish the existing costmap in lane driving, with strict input and TF freshness checks.
+  publish_continuously:
+    type: bool
+    default_value: false
+    description: Publish independently of the planning scenario, while still requiring a lanelet map and fresh real sensor inputs and TF.
+  input_timeout:
+    type: double
+    default_value: 0.5
+    description: Maximum sensor and vehicle TF age in lane-driving, continuous or local-inspection publication mode, in seconds.
+  publish_in_vehicle_frame:
+    type: bool
+    default_value: false
+    description: Static inspection only, without a lanelet map; requires all frames to be base_link and disables map-area layers.
   use_objects:
     type: bool
     description: Whether using ~input/objects or not

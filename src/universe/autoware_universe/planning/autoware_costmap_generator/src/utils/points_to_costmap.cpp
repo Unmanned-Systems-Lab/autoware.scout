@@ -44,6 +44,8 @@
 
 #include "autoware/costmap_generator/utils/points_to_costmap.hpp"
 
+#include <cmath>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -137,10 +139,35 @@ grid_map::Matrix PointsToCostmap::makeCostmapFromPoints(
   const std::string & gridmap_layer_name, const pcl::PointCloud<pcl::PointXYZ> & in_sensor_points)
 {
   initGridmapParam(gridmap);
-  std::vector<std::vector<std::vector<double>>> grid_vec = assignPoints2GridCell(in_sensor_points);
-  grid_map::Matrix costmap = calculateCostmap(
-    maximum_height_thres, minimum_lidar_height_thres, grid_min_value, grid_max_value, gridmap,
-    gridmap_layer_name, grid_vec);
+  const auto & previous = gridmap[gridmap_layer_name];
+  grid_map::Matrix costmap =
+    grid_map::Matrix::Constant(previous.rows(), previous.cols(), grid_min_value);
+  std::vector<uint8_t> touched(previous.size(), 0);
+  for (const auto & point : in_sensor_points) {
+    if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z)) {
+      continue;
+    }
+    // Bound coordinates before converting to integer indices, including huge finite inputs.
+    if (
+      std::abs(point.x - grid_position_x_) > grid_length_x_ / 2 ||
+      std::abs(point.y - grid_position_y_) > grid_length_y_ / 2) {
+      continue;
+    }
+    const auto index = fetchGridIndexFromPoint(point);
+    if (index.x() < 0 || index.y() < 0 || index.x() >= previous.rows() ||
+        index.y() >= previous.cols()) {
+      continue;
+    }
+    const auto linear = index.x() + previous.rows() * index.y();
+    if (!touched[linear]) {
+      // Preserve the existing value for a nonempty cell whose heights are all excluded.
+      costmap(index.x(), index.y()) = previous(index.x(), index.y());
+      touched[linear] = 1;
+    }
+    if (point.z >= minimum_lidar_height_thres && point.z <= maximum_height_thres) {
+      costmap(index.x(), index.y()) = grid_max_value;
+    }
+  }
   return costmap;
 }
 

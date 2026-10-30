@@ -1,5 +1,5 @@
 repositories:
   ele_scouts_kit:
     type: git
-    url: git@github.com:multimeters/ele_scouts_kit.git
-    version: a3b5c3bf4fe48d32311628be58da27efc3d85374
+    url: git@github.com:CQULzz/eletranskit_scout.git
+    version: 5163982d0faef28e84c9b00dc9d7367707175871

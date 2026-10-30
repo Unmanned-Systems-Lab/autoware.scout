@@ -8,23 +8,15 @@ if [[ $# -gt 1 || ! "$can_interface" =~ ^can[0-9]+$ ]]; then
   exit 2
 fi
 
-source "$repo_dir/setup_env.bash"
-zed_ws="/mnt/nvme0n1/autoware/zed_ros2_ws"
-export ZED_DIR="/mnt/nvme0n1/autoware/zed_sdk_5.5.1"
-export SCOUT_DATASET_ZED_CONFIG="$repo_dir/config/zed2i_640x360_15hz.yaml"
-if [[ ! -f "$zed_ws/install/local_setup.bash" || ! -f "$SCOUT_DATASET_ZED_CONFIG" || ! -d "$ZED_DIR" ]]; then
-  echo "缺少 ZED SDK、官方 ROS 2 wrapper 或相机配置，请查看 SCOUT_DATASET.md。" >&2
-  exit 1
-fi
-source "$zed_ws/install/local_setup.bash"
+source "$repo_dir/scripts/scout_dataset_env.bash"
 set -u
 
 existing_nodes="$(ros2 node list 2>/dev/null || true)"
-conflicts="$(printf '%s\n' "$existing_nodes" | grep -E '^(/scout_base|/fixposition_driver|/rslidar_sdk|/zed2i/zed_node)$' || true)"
+conflicts="$(printf '%s\n' "$existing_nodes" | grep -E '^(/scout_base|/scout_rc_command_estimator|/fixposition_driver|/rslidar_sdk|/zed2i/zed_node)$' || true)"
 if [[ -n "$conflicts" ]]; then
   echo "已有驱动节点运行，不能重复占用 CAN、雷达、RTK 或相机：" >&2
   printf '%s\n' "$conflicts" >&2
-  echo "若这些节点正在正常发布，可直接运行 ./record_scout_dataset.bash。" >&2
+  echo "请停止现有节点后重试；若复用它们，先用 ./record_scout_dataset.bash --check 验证全部话题。" >&2
   exit 1
 fi
 
